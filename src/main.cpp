@@ -18,6 +18,10 @@
 #define PIN_MOSI       7
 #define PIN_CS_IMU     9
 #define PIN_CS_BMP     12
+#define PIN_PYRO       1
+#define PIN_SERVO_1    2
+#define PIN_SERVO_2    3
+#define PIN_VIN_SENSE  27
 #define WS2812_PIN     0
 
 #define ICM45686_EXPECTED_ID   0xE9
@@ -36,6 +40,12 @@
 // The current register stream maps the stationary 1 g vector to about half scale.
 static constexpr float ACCEL_LSB_PER_G = 1024.0f;
 static constexpr float GYRO_LSB_PER_DPS = 16.4f;
+static constexpr float ADC_VREF = 3.3f;
+static constexpr float ADC_COUNTS = 4095.0f;
+static constexpr float VIN_DIVIDER_TOP_OHMS = 20000.0f;
+static constexpr float VIN_DIVIDER_BOTTOM_OHMS = 10000.0f;
+static constexpr float VIN_DIVIDER_RATIO =
+  (VIN_DIVIDER_TOP_OHMS + VIN_DIVIDER_BOTTOM_OHMS) / VIN_DIVIDER_BOTTOM_OHMS;
 
 struct ImuSample {
   int16_t ax;
@@ -89,8 +99,10 @@ float currentGy = 0.0f;
 float currentGz = 0.0f;
 float currentTemperature = 0.0f;
 float currentPressure = 0.0f;
+float currentVinVoltage = 0.0f;
+const char *currentPowerSource = "Unknown";
 
-const char kFlashSignature[] = "ASTRONAV_PCB_TEST_V11";
+const char kFlashSignature[] = "ASTRONAV_PCB_TEST";
 
 void setLedState(LedState state) {
   switch (state) {
@@ -142,6 +154,34 @@ bool testHeap() {
   bool ok = buffer[0] == 0x5A && buffer[1] == 0x5B && buffer[255] == static_cast<uint8_t>(255 ^ 0x5A);
   free(buffer);
   return ok;
+}
+
+bool readInputVoltage(float &voltage) {
+  const int samples = 8;
+  uint32_t total = 0;
+
+  for (int i = 0; i < samples; i++) {
+    total += static_cast<uint32_t>(analogRead(PIN_VIN_SENSE));
+    delay(1);
+  }
+
+  float averageCounts = static_cast<float>(total) / static_cast<float>(samples);
+  float senseVoltage = averageCounts * ADC_VREF / ADC_COUNTS;
+  voltage = senseVoltage * VIN_DIVIDER_RATIO;
+  return voltage > 0.1f;
+}
+
+const char *classifyPowerSource(float voltage) {
+  if (voltage >= 4.5f && voltage <= 5.5f) {
+    return "USB power";
+  }
+  if (voltage >= 3.0f && voltage <= 4.35f) {
+    return "1S LiPo";
+  }
+  if (voltage >= 6.0f && voltage <= 8.4f) {
+    return "2S LiPo";
+  }
+  return "Unknown";
 }
 
 bool readBaroSample(float &temperature, float &pressureHpa) {
@@ -281,6 +321,7 @@ void printBootResult() {
   Serial.printf("[TEST] IMU config   : %s\n", boolText(boardHealth.imuConfigOk));
   Serial.printf("[TEST] IMU stream   : %s\n", boolText(boardHealth.imuStreamOk));
   Serial.printf("[TEST] barometer    : %s\n", boolText(boardHealth.baroOk));
+  Serial.printf("[TEST] VIN sense    : %.3f V (%s)\n", currentVinVoltage, currentPowerSource);
   Serial.printf("[TEST] result       : %s\n", healthy ? "PASS" : (boardHealth.critical ? "FAIL" : "WARN"));
 
   if (millis() < bootWhiteUntilMs) {
@@ -299,13 +340,15 @@ void printRuntimeSummary() {
                        boardHealth.spiOk && boardHealth.imuWhoAmIOk && boardHealth.imuConfigOk &&
                        boardHealth.imuStreamOk && boardHealth.baroOk && !boardHealth.critical;
 
-  Serial.printf("[PCB] %s | core:%s flash:%s heap:%s imu:%s baro:%s | accel=%.3f,%.3f,%.3f g gyro=%.3f,%.3f,%.3f dps temp=%.1f C pressure=%.2f hPa\n",
+  Serial.printf("[PCB] %s | core:%s flash:%s heap:%s imu:%s baro:%s vin:%.3fV(%s) | accel=%.3f,%.3f,%.3f g gyro=%.3f,%.3f,%.3f dps temp=%.1f C pressure=%.2f hPa\n",
                 healthy ? "OK" : (boardHealth.critical ? "FAIL" : "WARN"),
                 boolText(boardHealth.coreTickOk),
                 boolText(boardHealth.flashOk),
                 boolText(boardHealth.heapOk),
                 boolText(boardHealth.imuWhoAmIOk && boardHealth.imuConfigOk && boardHealth.imuStreamOk),
                 boolText(boardHealth.baroOk),
+                currentVinVoltage,
+                currentPowerSource,
                 currentAx, currentAy, currentAz,
                 currentGx, currentGy, currentGz,
                 currentTemperature, currentPressure);
@@ -365,6 +408,7 @@ void setup() {
   setLedState(LedState::Busy);
   bootWhiteUntilMs = millis() + 2000;
   delay(400);
+  analogReadResolution(12);
 
   uint32_t startWait = millis();
   while (!Serial && (millis() - startWait < 3000)) { delay(10); }
@@ -373,8 +417,16 @@ void setup() {
   Serial.println("  AstroNav PCB Health Test v11              ");
   Serial.println("=============================================");
 
+  pinMode(PIN_PYRO, OUTPUT);
+  pinMode(PIN_SERVO_1, OUTPUT);
+  pinMode(PIN_SERVO_2, OUTPUT);
+  digitalWrite(PIN_PYRO, LOW);
+  digitalWrite(PIN_SERVO_1, LOW);
+  digitalWrite(PIN_SERVO_2, LOW);
+
   pinMode(PIN_CS_IMU, OUTPUT);
   pinMode(PIN_CS_BMP, OUTPUT);
+  pinMode(PIN_VIN_SENSE, INPUT);
   digitalWrite(PIN_CS_IMU, HIGH);
   digitalWrite(PIN_CS_BMP, HIGH);
 
@@ -391,6 +443,13 @@ void setup() {
   boardHealth.flashOk = testFlashRead();
   boardHealth.heapOk = testHeap();
 
+  if (readInputVoltage(currentVinVoltage)) {
+    currentPowerSource = classifyPowerSource(currentVinVoltage);
+    if (strcmp(currentPowerSource, "Unknown") == 0) {
+      boardHealth.warning = true;
+    }
+  }
+
   baro.beginSPI(PIN_CS_BMP, 250000);
   delay(30);
   boardHealth.baroOk = readBaroSample(currentTemperature, currentPressure);
@@ -403,6 +462,9 @@ void setup() {
   }
 
   boardHealth.warning = !boardHealth.baroOk || !boardHealth.imuStreamOk;
+  if (strcmp(currentPowerSource, "Unknown") == 0) {
+    boardHealth.warning = true;
+  }
   boardHealth.critical = !boardHealth.coreTickOk || !boardHealth.flashOk || !boardHealth.heapOk ||
                          !boardHealth.spiOk || !boardHealth.imuWhoAmIOk || !boardHealth.imuConfigOk ||
                          !boardHealth.imuStreamOk;
@@ -418,6 +480,11 @@ void setup() {
 // 3. MAIN LOOP
 // ---------------------------------------------------------
 void loop() {
+  if (readInputVoltage(currentVinVoltage)) {
+    currentPowerSource = classifyPowerSource(currentVinVoltage);
+    boardHealth.warning = strcmp(currentPowerSource, "Unknown") == 0;
+  }
+
   if (imuInitialized) {
     float ax = 0.0f, ay = 0.0f, az = 0.0f, gx = 0.0f, gy = 0.0f, gz = 0.0f;
     if (readImuFrame(ax, ay, az, gx, gy, gz)) {
