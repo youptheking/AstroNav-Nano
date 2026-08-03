@@ -8,6 +8,8 @@
 #include <math.h>
 #include <string.h>
 
+#include "usb_info_files.h"
+
 /*
  * AstroNav flight firmware for RP2350
  * - Startup health check with LED status
@@ -156,7 +158,6 @@ struct FlightSettings {
   float heightMarginM = 20.0f;
   float speedMarginMps = 8.0f;
   float launchThresholdG = 1.35f;
-  bool usbExit = false;
 };
 
 struct DeviceProfile {
@@ -367,7 +368,6 @@ void makeDefaultFlightSettings() {
   flightSettings.heightMarginM = 20.0f;
   flightSettings.speedMarginMps = 8.0f;
   flightSettings.launchThresholdG = 1.35f;
-  flightSettings.usbExit = false;
   applyFlightSettings();
 }
 
@@ -447,9 +447,6 @@ bool loadFlightSettings() {
     } else if (readSettingLine(line, "LAUNCH_THRESHOLD_G", value, sizeof(value))) {
       flightSettings.launchThresholdG = static_cast<float>(atof(value));
       anyValue = true;
-    } else if (readSettingLine(line, "USB_EXIT", value, sizeof(value))) {
-      flightSettings.usbExit = parseBoolValue(value);
-      anyValue = true;
     }
   }
 
@@ -479,13 +476,11 @@ void saveFlightSettings() {
   settingsFile.println("# ESTIMATED_SPEED_MPS: expected peak speed used to tune apogee detection.");
   settingsFile.println("# SPEED_MARGIN_MPS: speed safety margin added around the estimate.");
   settingsFile.println("# LAUNCH_THRESHOLD_G: acceleration threshold used to confirm liftoff.");
-  settingsFile.println("# USB_EXIT: set TRUE to leave USB storage mode and enter flight mode.");
   settingsFile.printf("ESTIMATED_HEIGHT_M=%.1f\n", flightSettings.estimatedHeightM);
   settingsFile.printf("HEIGHT_MARGIN_M=%.1f\n", flightSettings.heightMarginM);
   settingsFile.printf("ESTIMATED_SPEED_MPS=%.1f\n", flightSettings.estimatedSpeedMps);
   settingsFile.printf("SPEED_MARGIN_MPS=%.1f\n", flightSettings.speedMarginMps);
   settingsFile.printf("LAUNCH_THRESHOLD_G=%.2f\n", flightSettings.launchThresholdG);
-  settingsFile.printf("USB_EXIT=%s\n", flightSettings.usbExit ? "TRUE" : "FALSE");
   settingsFile.flush();
   settingsFile.close();
 }
@@ -937,36 +932,19 @@ void ensureUsbDemoFile() {
     return;
   }
 
-  howToFile.println("AstroNav Nano USB Guide");
-  howToFile.println("Author: YoupSpace");
-  howToFile.println();
-  howToFile.println("What is on the drive:");
-  howToFile.println("- HOWTO.TXT: user guide");
-  howToFile.println("- SETTINGS.TXT: values you can edit and save");
-  howToFile.println("- PERSONAL.TXT: read-only copy of the device profile stored in flash");
-  howToFile.println();
-  howToFile.println("How to leave USB mode:");
-  howToFile.println("1. Preferred: use Safely Remove Hardware / Eject in Windows.");
-  howToFile.println("2. Or send EXITUSB over the serial monitor.");
-  howToFile.println("3. Or change USB_EXIT=FALSE to USB_EXIT=TRUE in SETTINGS.TXT and save it.");
-  howToFile.println("4. Wait a moment for the board to switch to flight mode.");
-  howToFile.println();
-  howToFile.println("What the settings mean:");
-  howToFile.println("- ESTIMATED_HEIGHT_M: your expected apogee height in meters.");
-  howToFile.println("  Higher values make the apogee detector wait for a bigger altitude drop.");
-  howToFile.println("- HEIGHT_MARGIN_M: extra height margin around the estimate.");
-  howToFile.println("  Bigger margins make the height checks more forgiving.");
-  howToFile.println("- ESTIMATED_SPEED_MPS: your expected peak climb speed in meters per second.");
-  howToFile.println("  This helps tune the apogee speed check.");
-  howToFile.println("- SPEED_MARGIN_MPS: extra speed margin around the estimate.");
-  howToFile.println("  Bigger margins widen the safe window for speed checks.");
-  howToFile.println("- LAUNCH_THRESHOLD_G: acceleration needed before launch is confirmed.");
-  howToFile.println("  Lower values trigger earlier, higher values require a harder launch.");
-  howToFile.println("- USB_EXIT: TRUE requests exit from USB storage mode, FALSE stays in USB mode.");
-  howToFile.println();
-  howToFile.println("PERSONAL.TXT is regenerated from flash-backed data and is only for viewing.");
+  UsbInfoFiles::writeHowto(howToFile);
   howToFile.flush();
   howToFile.close();
+
+  File websiteFile = FatFS.open("/WEBSITE.TXT", "w");
+  if (!websiteFile) {
+    boardHealth.warning = true;
+    return;
+  }
+
+  UsbInfoFiles::writeWebsite(websiteFile);
+  websiteFile.flush();
+  websiteFile.close();
 
   if (!FatFS.exists("/SETTINGS.TXT")) {
     saveFlightSettings();
@@ -977,7 +955,9 @@ void ensureUsbDemoFile() {
 
 void onUsbStorageUnplug(uint32_t cbData) {
   (void) cbData;
-  usbExitRequested = true;
+  if (!usbFlightOverride) {
+    usbExitRequested = true;
+  }
 }
 
 bool shouldExitUsbModeFromDemoFile() {
@@ -985,13 +965,7 @@ bool shouldExitUsbModeFromDemoFile() {
     return false;
   }
 
-  uint32_t now = millis();
-  if (now - lastUsbSettingsPollMs < 250) {
-    return false;
-  }
-  lastUsbSettingsPollMs = now;
-
-  return usbExitRequested || (loadFlightSettings() && flightSettings.usbExit);
+  return usbExitRequested;
 }
 
 void enterFlightModeFromUsb() {
