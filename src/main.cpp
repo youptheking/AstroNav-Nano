@@ -4,6 +4,7 @@
 #include <SparkFun_BMP581_Arduino_Library.h>
 #include <FatFS.h>
 #include <FatFSUSB.h>
+#include <ctype.h>
 #include <math.h>
 #include <string.h>
 
@@ -71,6 +72,8 @@ static constexpr uint8_t LANDING_CONFIRM_SAMPLES = 15;
 static constexpr uint32_t PYRO_PULSE_MS = 350;
 static constexpr uint32_t MAX_FLIGHT_TIME_MS = 45000;
 static constexpr uint16_t FLIGHT_LOG_CAPACITY = 2048;
+static constexpr uint32_t PROFILE_MAGIC = 0x50455246;   // "FRFP"
+static constexpr uint32_t PROFILE_VERSION = 1;
 
 struct ImuSample {
   int16_t ax;
@@ -91,6 +94,8 @@ enum class PowerMode {
 enum class FlightState {
   Booting,
   Calibrating,
+  Idle,
+  UsbMode,
   Armed,
   Boost,
   Coast,
@@ -101,6 +106,7 @@ enum class FlightState {
 
 enum class LedProfile {
   Boot,
+  Idle,
   IdleUsb,
   Idle1S,
   Idle2S,
@@ -142,6 +148,29 @@ struct FlightSample {
   int16_t pitchD10 = 0;
   uint8_t healthBits = 0;
   uint8_t state = 0;
+};
+
+struct FlightSettings {
+  float estimatedHeightM = 120.0f;
+  float estimatedSpeedMps = 35.0f;
+  float heightMarginM = 20.0f;
+  float speedMarginMps = 8.0f;
+  float launchThresholdG = 1.35f;
+  bool usbExit = false;
+};
+
+struct DeviceProfile {
+  uint32_t magic = PROFILE_MAGIC;
+  uint32_t version = PROFILE_VERSION;
+  char serialNumber[20] = "AN-0001";
+  char flashStamp[24] = "";
+  uint32_t flightCount = 0;
+  uint32_t logCount = 0;
+  float maxFlightAltitudeM = 0.0f;
+  float maxFlightSpeedMps = 0.0f;
+  float lastFlightAltitudeM = 0.0f;
+  float lastFlightSpeedMps = 0.0f;
+  uint32_t checksum = 0;
 };
 
 Adafruit_NeoPixel led(1, WS2812_PIN, NEO_GRB + NEO_KHZ800);
@@ -200,6 +229,16 @@ uint8_t launchConfirmCount = 0;
 uint8_t apogeeConfirmCount = 0;
 uint8_t landingConfirmCount = 0;
 uint32_t logCounter = 0;
+float peakFlightSpeedMps = 0.0f;
+
+float flightLaunchThresholdG = 1.35f;
+float flightApogeeDropM = 0.25f;
+float flightApogeeVelocityThresholdMPS = -0.25f;
+float flightLandingAltitudeToleranceM = 2.0f;
+float flightLandingVelocityToleranceMPS = 0.25f;
+
+FlightSettings flightSettings;
+DeviceProfile deviceProfile;
 
 FlightSample missionLog[FLIGHT_LOG_CAPACITY];
 uint16_t missionLogCount = 0;
@@ -209,6 +248,7 @@ char missionLogPath[48] = {0};
 void setStatusLED(uint8_t r, uint8_t g, uint8_t b);
 void setLedProfile(LedProfile profile);
 void updateStatusLed();
+float clampFloat(float value, float minimum, float maximum);
 void appendMissionSample();
 void flushMissionLogToFlash();
 void firePyro();
@@ -217,9 +257,14 @@ void updateFlightStateFromSamples();
 void recordFaultAndSafeStop();
 void startMissionLog();
 void ensureLogsDirectory();
-void ensureUsbDemoFile();
 void handleSerialCommand(const char *command);
 void enterFlightModeFromUsb();
+void ensureUsbDemoFile();
+bool shouldExitUsbModeFromDemoFile();
+bool loadFlightSettings();
+bool loadOrCreateDeviceProfile();
+void persistDeviceProfile();
+void writePersonalFile();
 bool systemHealthy();
 
 uint8_t readRegister(uint8_t csPin, uint8_t regAddr, SPISettings settings);
@@ -236,6 +281,8 @@ const char *stateText(FlightState state) {
   switch (state) {
     case FlightState::Booting: return "boot";
     case FlightState::Calibrating: return "calibrating";
+    case FlightState::Idle: return "idle";
+    case FlightState::UsbMode: return "usb mode";
     case FlightState::Armed: return "armed";
     case FlightState::Boost: return "boost";
     case FlightState::Coast: return "coast";
@@ -254,6 +301,283 @@ const char *powerModeText(PowerMode mode) {
     case PowerMode::Unknown:
     default: return "Unknown";
   }
+}
+
+const char *runtimeModeText() {
+  if (powerMode == PowerMode::USB && !usbFlightOverride) {
+    return "usb";
+  }
+
+  return "flight";
+}
+
+void buildFlashStamp(char *buffer, size_t bufferSize) {
+  static const char *months[] = {
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+  };
+
+  int day = 1;
+  int year = 2026;
+  int monthIndex = 7;
+  char monthText[4] = {0};
+
+  if (sscanf(__DATE__, "%3s %d %d", monthText, &day, &year) == 3) {
+    for (int i = 0; i < 12; i++) {
+      if (strcmp(monthText, months[i]) == 0) {
+        monthIndex = i;
+        break;
+      }
+    }
+  }
+
+  snprintf(buffer, bufferSize, "%02d-%02d-%04d %s",
+           day,
+           monthIndex + 1,
+           year,
+           __TIME__);
+}
+
+uint32_t checksumBytes(const uint8_t *data, size_t length) {
+  uint32_t hash = 2166136261u;
+  for (size_t i = 0; i < length; i++) {
+    hash ^= data[i];
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+void applyFlightSettings() {
+  float heightMargin = clampFloat(flightSettings.heightMarginM, 0.0f, 1000.0f);
+  float speedMargin = clampFloat(flightSettings.speedMarginMps, 0.0f, 1000.0f);
+
+  flightLaunchThresholdG = clampFloat(flightSettings.launchThresholdG, 1.15f, 4.0f);
+  flightApogeeDropM = clampFloat((flightSettings.estimatedHeightM * 0.08f) + (heightMargin * 0.25f), 0.25f, 50.0f);
+  flightApogeeVelocityThresholdMPS = -clampFloat((flightSettings.estimatedSpeedMps * 0.05f) + (speedMargin * 0.15f), 0.25f, 12.0f);
+  flightLandingAltitudeToleranceM = clampFloat(2.0f + (heightMargin * 0.05f), 2.0f, 25.0f);
+  flightLandingVelocityToleranceMPS = clampFloat(0.25f + (speedMargin * 0.05f), 0.25f, 5.0f);
+}
+
+void makeDefaultFlightSettings() {
+  flightSettings.estimatedHeightM = 120.0f;
+  flightSettings.estimatedSpeedMps = 35.0f;
+  flightSettings.heightMarginM = 20.0f;
+  flightSettings.speedMarginMps = 8.0f;
+  flightSettings.launchThresholdG = 1.35f;
+  flightSettings.usbExit = false;
+  applyFlightSettings();
+}
+
+void saveFlightSettings();
+
+bool parseBoolValue(const char *text) {
+  if (!text) {
+    return false;
+  }
+  while (*text == ' ' || *text == '\t') {
+    text++;
+  }
+  return (strcasecmp(text, "TRUE") == 0) || (strcasecmp(text, "1") == 0) ||
+         (strcasecmp(text, "YES") == 0) || (strcasecmp(text, "ON") == 0);
+}
+
+bool readSettingLine(const char *line, const char *key, char *valueBuffer, size_t valueBufferSize) {
+  size_t keyLength = strlen(key);
+  if (strncmp(line, key, keyLength) != 0 || line[keyLength] != '=') {
+    return false;
+  }
+
+  const char *valueStart = line + keyLength + 1;
+  while (*valueStart == ' ' || *valueStart == '\t') {
+    valueStart++;
+  }
+
+  strncpy(valueBuffer, valueStart, valueBufferSize - 1);
+  valueBuffer[valueBufferSize - 1] = '\0';
+
+  size_t valueLength = strlen(valueBuffer);
+  while (valueLength > 0 && (valueBuffer[valueLength - 1] == '\r' || valueBuffer[valueLength - 1] == '\n' || valueBuffer[valueLength - 1] == ' ' || valueBuffer[valueLength - 1] == '\t')) {
+    valueBuffer[valueLength - 1] = '\0';
+    valueLength--;
+  }
+
+  return true;
+}
+
+bool loadFlightSettings() {
+  if (!storageReady || !FatFS.exists("/SETTINGS.TXT")) {
+    makeDefaultFlightSettings();
+    return false;
+  }
+
+  File settingsFile = FatFS.open("/SETTINGS.TXT", "r");
+  if (!settingsFile) {
+    makeDefaultFlightSettings();
+    return false;
+  }
+
+  makeDefaultFlightSettings();
+  bool anyValue = false;
+  char line[128];
+
+  while (settingsFile.available()) {
+    size_t length = settingsFile.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[length] = '\0';
+
+    if (line[0] == '#' || line[0] == ';' || line[0] == '\0') {
+      continue;
+    }
+
+    char value[64];
+    if (readSettingLine(line, "ESTIMATED_HEIGHT_M", value, sizeof(value))) {
+      flightSettings.estimatedHeightM = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readSettingLine(line, "ESTIMATED_SPEED_MPS", value, sizeof(value))) {
+      flightSettings.estimatedSpeedMps = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readSettingLine(line, "HEIGHT_MARGIN_M", value, sizeof(value))) {
+      flightSettings.heightMarginM = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readSettingLine(line, "SPEED_MARGIN_MPS", value, sizeof(value))) {
+      flightSettings.speedMarginMps = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readSettingLine(line, "LAUNCH_THRESHOLD_G", value, sizeof(value))) {
+      flightSettings.launchThresholdG = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readSettingLine(line, "USB_EXIT", value, sizeof(value))) {
+      flightSettings.usbExit = parseBoolValue(value);
+      anyValue = true;
+    }
+  }
+
+  settingsFile.close();
+  applyFlightSettings();
+  if (!anyValue) {
+    saveFlightSettings();
+  }
+  return true;
+}
+
+void saveFlightSettings() {
+  if (!storageReady) {
+    return;
+  }
+
+  File settingsFile = FatFS.open("/SETTINGS.TXT", "w");
+  if (!settingsFile) {
+    boardHealth.warning = true;
+    return;
+  }
+
+  settingsFile.println("# AstroNav Nano flight settings");
+  settingsFile.println("# Edit the values below, then save the file.");
+  settingsFile.printf("ESTIMATED_HEIGHT_M=%.1f\n", flightSettings.estimatedHeightM);
+  settingsFile.printf("HEIGHT_MARGIN_M=%.1f\n", flightSettings.heightMarginM);
+  settingsFile.printf("ESTIMATED_SPEED_MPS=%.1f\n", flightSettings.estimatedSpeedMps);
+  settingsFile.printf("SPEED_MARGIN_MPS=%.1f\n", flightSettings.speedMarginMps);
+  settingsFile.printf("LAUNCH_THRESHOLD_G=%.2f\n", flightSettings.launchThresholdG);
+  settingsFile.printf("USB_EXIT=%s\n", flightSettings.usbExit ? "TRUE" : "FALSE");
+  settingsFile.flush();
+  settingsFile.close();
+}
+
+void makeDefaultDeviceProfile() {
+  memset(&deviceProfile, 0, sizeof(deviceProfile));
+  deviceProfile.magic = PROFILE_MAGIC;
+  deviceProfile.version = PROFILE_VERSION;
+  snprintf(deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber), "AN-0001");
+  buildFlashStamp(deviceProfile.flashStamp, sizeof(deviceProfile.flashStamp));
+}
+
+void updateDeviceProfileChecksum() {
+  deviceProfile.checksum = 0;
+  deviceProfile.checksum = checksumBytes(reinterpret_cast<const uint8_t *>(&deviceProfile), sizeof(deviceProfile) - sizeof(deviceProfile.checksum));
+}
+
+bool loadOrCreateDeviceProfile() {
+  if (!storageReady || !FatFS.exists("/PROFILE.BIN")) {
+    makeDefaultDeviceProfile();
+    updateDeviceProfileChecksum();
+    return false;
+  }
+
+  File profileFile = FatFS.open("/PROFILE.BIN", "r");
+  if (!profileFile) {
+    makeDefaultDeviceProfile();
+    updateDeviceProfileChecksum();
+    return false;
+  }
+
+  if (profileFile.read(reinterpret_cast<uint8_t *>(&deviceProfile), sizeof(deviceProfile)) != sizeof(deviceProfile)) {
+    profileFile.close();
+    makeDefaultDeviceProfile();
+    updateDeviceProfileChecksum();
+    return false;
+  }
+  profileFile.close();
+
+  uint32_t expectedChecksum = deviceProfile.checksum;
+  uint32_t savedChecksum = deviceProfile.checksum;
+  deviceProfile.checksum = 0;
+  if (deviceProfile.magic != PROFILE_MAGIC || deviceProfile.version != PROFILE_VERSION) {
+    makeDefaultDeviceProfile();
+    updateDeviceProfileChecksum();
+    return false;
+  }
+
+  uint32_t computedChecksum = checksumBytes(reinterpret_cast<const uint8_t *>(&deviceProfile), sizeof(deviceProfile) - sizeof(deviceProfile.checksum));
+  if (computedChecksum != expectedChecksum || savedChecksum == 0) {
+    makeDefaultDeviceProfile();
+    updateDeviceProfileChecksum();
+    return false;
+  }
+
+  deviceProfile.checksum = expectedChecksum;
+  return true;
+}
+
+void persistDeviceProfile() {
+  if (!storageReady) {
+    return;
+  }
+
+  updateDeviceProfileChecksum();
+  File profileFile = FatFS.open("/PROFILE.BIN", "w");
+  if (!profileFile) {
+    boardHealth.warning = true;
+    return;
+  }
+
+  profileFile.write(reinterpret_cast<const uint8_t *>(&deviceProfile), sizeof(deviceProfile));
+  profileFile.flush();
+  profileFile.close();
+}
+
+void writePersonalFile() {
+  if (!storageReady) {
+    return;
+  }
+
+  File personalFile = FatFS.open("/PERSONAL.TXT", "w");
+  if (!personalFile) {
+    boardHealth.warning = true;
+    return;
+  }
+
+  personalFile.println("AstroNav Nano Personal Data");
+  personalFile.println("This is a text copy of the flash-backed profile data.");
+  personalFile.println();
+  personalFile.printf("FlashStamp=%s\n", deviceProfile.flashStamp);
+  personalFile.printf("SerialNumber=%s\n", deviceProfile.serialNumber);
+  personalFile.printf("FlightCount=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
+  personalFile.printf("LogCount=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
+  personalFile.printf("MaxFlightAltitudeM=%.1f\n", deviceProfile.maxFlightAltitudeM);
+  personalFile.printf("MaxFlightSpeedMps=%.1f\n", deviceProfile.maxFlightSpeedMps);
+  personalFile.printf("LastFlightAltitudeM=%.1f\n", deviceProfile.lastFlightAltitudeM);
+  personalFile.printf("LastFlightSpeedMps=%.1f\n", deviceProfile.lastFlightSpeedMps);
+  personalFile.printf("ProfileChecksum=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
+  personalFile.flush();
+  personalFile.close();
 }
 
 float clampFloat(float value, float minimum, float maximum) {
@@ -598,28 +922,42 @@ void ensureUsbDemoFile() {
     return;
   }
 
-  if (FatFS.exists("/USB_MODE_DEMO.TXT")) {
-    return;
+  if (!FatFS.exists("/HOWTO.TXT")) {
+    File howToFile = FatFS.open("/HOWTO.TXT", "w");
+    if (!howToFile) {
+      boardHealth.warning = true;
+      return;
+    }
+
+    howToFile.println("AstroNav Nano USB Guide");
+    howToFile.println("Author: YoupSpace");
+    howToFile.println();
+    howToFile.println("Open SETTINGS.TXT to tune the estimated flight height and speed.");
+    howToFile.println("Change USB_EXIT=FALSE to USB_EXIT=TRUE and save SETTINGS.TXT to leave USB mode.");
+    howToFile.println("PERSONAL.TXT is copied from the flash-backed profile and is regenerated automatically.");
+    howToFile.println();
+    howToFile.println("Files:");
+    howToFile.println("- HOWTO.TXT: this guide");
+    howToFile.println("- SETTINGS.TXT: editable flight estimates and USB exit switch");
+    howToFile.println("- PERSONAL.TXT: flash-backed profile copy");
+    howToFile.flush();
+    howToFile.close();
   }
 
-  File demoFile = FatFS.open("/USB_MODE_DEMO.TXT", "w");
-  if (!demoFile) {
-    boardHealth.warning = true;
-    return;
+  if (!FatFS.exists("/SETTINGS.TXT")) {
+    saveFlightSettings();
   }
 
-  demoFile.println("AstroNav Nano USB Mode Demo");
-  demoFile.println("Author: YoupSpace");
-  demoFile.println();
-  demoFile.println("1. Connect the board over USB.");
-  demoFile.println("2. Open this drive in your computer.");
-  demoFile.println("3. Copy logs from the LOGS folder after flight.");
-  demoFile.println("4. Open the serial monitor if you want to switch into flight mode.");
-  demoFile.println("5. Send FLIGHT, EXITUSB, or ARM to leave USB mode and enter flight mode.");
-  demoFile.println();
-  demoFile.println("USB mode stays active until you intentionally switch out of it.");
-  demoFile.flush();
-  demoFile.close();
+  writePersonalFile();
+}
+
+bool shouldExitUsbModeFromDemoFile() {
+  if (!storageReady) {
+    return false;
+  }
+
+  loadFlightSettings();
+  return flightSettings.usbExit;
 }
 
 void enterFlightModeFromUsb() {
@@ -632,7 +970,7 @@ void enterFlightModeFromUsb() {
 
   flightState = FlightState::Calibrating;
   if (calibratePadOrientation()) {
-    flightState = FlightState::Armed;
+    flightState = FlightState::Idle;
     startMissionLog();
     appendMissionSample();
   } else {
@@ -728,6 +1066,9 @@ void setLedProfile(LedProfile profile) {
     case LedProfile::Boot:
       scaleAndSet(255, 255, 255);
       break;
+    case LedProfile::Idle:
+      scaleAndSet(0, 255, 160);
+      break;
     case LedProfile::IdleUsb:
       scaleAndSet(0, 128, 255);
       break;
@@ -769,6 +1110,12 @@ void updateStatusLed() {
       setLedProfile(LedProfile::Boot);
       break;
     case FlightState::Calibrating:
+      setLedProfile(LedProfile::Boot);
+      break;
+    case FlightState::Idle:
+      setLedProfile(LedProfile::Idle);
+      break;
+    case FlightState::UsbMode:
       setLedProfile(LedProfile::IdleUsb);
       break;
     case FlightState::Armed:
@@ -794,11 +1141,17 @@ void updateStatusLed() {
 }
 
 void printStartupSummary() {
-  Serial.printf("[BOOT] state=%s healthy=%s\n", stateText(flightState), boolText(systemHealthy()));
+  Serial.printf("[BOOT] mode=%s state=%s healthy=%s\n",
+                runtimeModeText(),
+                stateText(flightState),
+                boolText(systemHealthy()));
 }
 
 void printRuntimeSummary() {
-  Serial.printf("[FLIGHT] state=%s healthy=%s\n", stateText(flightState), boolText(systemHealthy()));
+  Serial.printf("[RUNTIME] mode=%s state=%s healthy=%s\n",
+                runtimeModeText(),
+                stateText(flightState),
+                boolText(systemHealthy()));
 }
 
 void firePyro() {
@@ -846,8 +1199,8 @@ void updateFlightStateFromSamples() {
   currentVerticalVelocity = (currentVerticalVelocity * 0.75f) + (rawVelocity * 0.25f);
   lastAltitudeForVelocity = currentAltitude;
 
-  if (flightState == FlightState::Armed) {
-    if (accelMag > LAUNCH_THRESHOLD_G) {
+  if (flightState == FlightState::Idle) {
+    if (accelMag > flightLaunchThresholdG) {
       if (launchConfirmCount < 255) {
         launchConfirmCount++;
       }
@@ -867,8 +1220,8 @@ void updateFlightStateFromSamples() {
       flightState = FlightState::Coast;
     }
 
-    bool apogeeCandidate = (peakAltitude - currentAltitude) >= APOGEE_DROP_M &&
-                           currentVerticalVelocity <= APOGEE_VELOCITY_THRESHOLD_MPS &&
+    bool apogeeCandidate = (peakAltitude - currentAltitude) >= flightApogeeDropM &&
+                           currentVerticalVelocity <= flightApogeeVelocityThresholdMPS &&
                            accelMag <= APOGEE_ACCEL_MAX_G &&
                            (millis() - launchMs) >= LAUNCH_MIN_TIME_MS;
 
@@ -891,7 +1244,7 @@ void updateFlightStateFromSamples() {
   }
 
   if (pyroLatched && missionStarted && !missionLogFlushed) {
-    if (currentAltitude <= LANDING_ALTITUDE_TOLERANCE_M && fabsf(currentVerticalVelocity) <= LANDING_VELOCITY_TOLERANCE_MPS && accelMag <= 1.15f && gravityProjection >= 0.8f) {
+    if (currentAltitude <= flightLandingAltitudeToleranceM && fabsf(currentVerticalVelocity) <= flightLandingVelocityToleranceMPS && accelMag <= 1.15f && gravityProjection >= 0.8f) {
       if (landingConfirmCount < 255) {
         landingConfirmCount++;
       }
@@ -978,6 +1331,8 @@ void setup() {
   boardHealth.flashFsOk = storageReady;
   if (storageReady) {
     ensureLogsDirectory();
+    loadFlightSettings();
+    loadOrCreateDeviceProfile();
   }
 
   if (powerMode == PowerMode::USB && storageReady && !usbFlightOverride) {
@@ -1003,14 +1358,10 @@ void setup() {
 
   printStartupSummary();
 
-  startMissionLog();
-  appendMissionSample();
-
   if (boardHealth.critical) {
     flightState = FlightState::Fault;
   } else if (powerMode == PowerMode::USB && !usbFlightOverride) {
-    flightState = FlightState::Landed;
-    flushMissionLogToFlash();
+    flightState = FlightState::UsbMode;
   } else {
     flightState = FlightState::Calibrating;
     if (!calibratePadOrientation()) {
@@ -1018,12 +1369,16 @@ void setup() {
       recordFaultAndSafeStop();
       flightState = FlightState::Fault;
     } else {
-      flightState = FlightState::Armed;
+      flightState = FlightState::Idle;
     }
   }
 
-  if (powerMode == PowerMode::USB && usbFlightOverride) {
-    flightState = FlightState::Calibrating;
+  if (storageReady) {
+    if (powerMode == PowerMode::USB && !usbFlightOverride) {
+      writePersonalFile();
+    } else {
+      persistDeviceProfile();
+    }
   }
 
   updateStatusLed();
@@ -1044,6 +1399,10 @@ void loop() {
     } else if (serialCommandLength < sizeof(serialCommandBuffer) - 1) {
       serialCommandBuffer[serialCommandLength++] = incoming;
     }
+  }
+
+  if (powerMode == PowerMode::USB && !usbFlightOverride && shouldExitUsbModeFromDemoFile()) {
+    enterFlightModeFromUsb();
   }
 
   if (now >= nextLedMs) {
