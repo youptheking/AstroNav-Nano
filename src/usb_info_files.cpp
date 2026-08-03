@@ -2,14 +2,14 @@
 
 namespace UsbInfoFiles {
 
-void writeHowto(File &file) {
+void writeHowtoIni(File &file) {
   file.println("AstroNav Nano USB Guide");
   file.println("Author: YoupSpace");
   file.println();
   file.println("What is on the drive:");
-  file.println("- HOWTO.TXT: user guide");
-  file.println("- SETTINGS.TXT: values you can edit and save");
-  file.println("- PERSONAL.TXT: read-only copy of the device profile stored in flash");
+  file.println("- HOWTO.INI: user guide");
+  file.println("- SETTINGS.INI: values you can edit and save");
+  file.println("- PROFILE.INI: read-only copy of the device profile stored in flash");
   file.println();
   file.println("How to leave USB mode:");
   file.println("1. Preferred: use Safely Remove Hardware / Eject in Windows.");
@@ -29,17 +29,76 @@ void writeHowto(File &file) {
   file.println("  Lower values trigger earlier, higher values require a harder launch.");
   file.println();
   file.println("Extra files on the drive:");
-  file.println("- PERSONAL.TXT: flash-backed device profile copy");
-  file.println("- WEBSITE.TXT: your site link");
+  file.println("- PROFILE.INI: flash-backed device profile copy");
+  file.println("- WEBSITE.URL: clickable website shortcut");
   file.println();
-  file.println("PERSONAL.TXT is regenerated from flash-backed data and is only for viewing.");
+  file.println("PROFILE.INI is regenerated from flash-backed data and is only for viewing.");
 }
 
-void writeWebsite(File &file) {
-  file.println("YoupSpace website");
-  file.println("https://youpspace.com/");
+void writeWebsiteShortcut(File &file) {
+  file.println("[InternetShortcut]");
+  file.println("URL=https://youpspace.com/");
+  file.println("IconIndex=0");
+}
+
+void writeSettingsIni(File &file,
+                      float estimatedHeightM,
+                      float estimatedSpeedMps,
+                      float heightMarginM,
+                      float speedMarginMps,
+                      float launchThresholdG) {
+  file.println("[flight]");
+  file.println("; AstroNav Nano flight settings");
+  file.println("; Edit the values below, then save the file.");
+  file.println("; This file uses INI-style key/value pairs.");
+  file.printf("ESTIMATED_HEIGHT_M=%.1f\n", estimatedHeightM);
+  file.printf("HEIGHT_MARGIN_M=%.1f\n", heightMarginM);
+  file.printf("ESTIMATED_SPEED_MPS=%.1f\n", estimatedSpeedMps);
+  file.printf("SPEED_MARGIN_MPS=%.1f\n", speedMarginMps);
+  file.printf("LAUNCH_THRESHOLD_G=%.2f\n", launchThresholdG);
+}
+
+void writeDebugIni(File &file,
+                   const char *faultReason,
+                   bool coreTickOk,
+                   bool heapOk,
+                   bool spiOk,
+                   bool imuWhoAmIOk,
+                   bool imuConfigOk,
+                   bool imuStreamOk,
+                   bool baroOk,
+                   bool flashFsOk,
+                   bool usbStorageOk,
+                   bool vinOk,
+                   bool warning,
+                   bool critical,
+                   float vinVoltage,
+                   uint8_t healthBits,
+                   const char *runtimeMode,
+                   const char *state,
+                   const char *powerMode) {
+  file.println("[debug]");
+  file.printf("FAULT_REASON=%s\n", faultReason && faultReason[0] ? faultReason : "none");
+  file.printf("RUNTIME_MODE=%s\n", runtimeMode ? runtimeMode : "unknown");
+  file.printf("STATE=%s\n", state ? state : "unknown");
+  file.printf("POWER_MODE=%s\n", powerMode ? powerMode : "unknown");
+  file.printf("VIN_VOLTAGE=%.3f\n", vinVoltage);
+  file.printf("HEALTH_BITS=%u\n", healthBits);
+  file.printf("HEALTHY=%s\n", (coreTickOk && heapOk && spiOk && imuWhoAmIOk && imuConfigOk && imuStreamOk && baroOk && !critical) ? "TRUE" : "FALSE");
   file.println();
-  file.println("Open this link in your browser.");
+  file.println("[checks]");
+  file.printf("CORE_TICK_OK=%s\n", coreTickOk ? "TRUE" : "FALSE");
+  file.printf("HEAP_OK=%s\n", heapOk ? "TRUE" : "FALSE");
+  file.printf("SPI_OK=%s\n", spiOk ? "TRUE" : "FALSE");
+  file.printf("IMU_WHOAMI_OK=%s\n", imuWhoAmIOk ? "TRUE" : "FALSE");
+  file.printf("IMU_CONFIG_OK=%s\n", imuConfigOk ? "TRUE" : "FALSE");
+  file.printf("IMU_STREAM_OK=%s\n", imuStreamOk ? "TRUE" : "FALSE");
+  file.printf("BARO_OK=%s\n", baroOk ? "TRUE" : "FALSE");
+  file.printf("FLASH_FS_OK=%s\n", flashFsOk ? "TRUE" : "FALSE");
+  file.printf("USB_STORAGE_OK=%s\n", usbStorageOk ? "TRUE" : "FALSE");
+  file.printf("VIN_OK=%s\n", vinOk ? "TRUE" : "FALSE");
+  file.printf("WARNING=%s\n", warning ? "TRUE" : "FALSE");
+  file.printf("CRITICAL=%s\n", critical ? "TRUE" : "FALSE");
 }
 
 }

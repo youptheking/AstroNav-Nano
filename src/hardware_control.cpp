@@ -4,8 +4,22 @@
 #include <SparkFun_BMP581_Arduino_Library.h>
 #include <cmath>
 
+enum class FlightState {
+  Booting,
+  Calibrating,
+  Idle,
+  UsbMode,
+  Armed,
+  Boost,
+  Coast,
+  PyroFired,
+  Landed,
+  Fault
+};
+
 extern Adafruit_NeoPixel led;
 extern BMP581 baro;
+extern FlightState flightState;
 extern bool boardHealthCritical;
 extern bool boardHealthWarning;
 extern bool storageReady;
@@ -28,8 +42,8 @@ extern void setLedProfile(int profile);
 extern void updateStatusLed();
 extern void enterFlightModeFromUsb();
 extern void onUsbStorageUnplug(uint32_t cbData);
-extern void ensureUsbDemoFile();
-extern void writePersonalFile();
+extern void ensureUsbInfoFiles();
+extern void writeProfileIniFile();
 extern void persistDeviceProfile();
 extern void flushMissionLogToFlash();
 extern void startMissionLog();
@@ -195,6 +209,14 @@ bool configureImu() {
     }
   }
 
+  boardHealth.spiOk = transportOk;
+  boardHealth.imuWhoAmIOk = transportOk && (whoAmI == ICM45686_EXPECTED_ID);
+
+  if (!boardHealth.imuWhoAmIOk) {
+    return false;
+  }
+
+  // Match the proven test-tool sequence: switch mode, wait briefly, then write config.
   if (!transportOk || whoAmI != ICM45686_EXPECTED_ID) {
     return false;
   }
@@ -205,9 +227,12 @@ bool configureImu() {
   writeRegister(PIN_CS_IMU, ICM_REG_ACCEL_CONFIG0, 0x06, spiSettings);
   writeRegister(PIN_CS_IMU, ICM_REG_GYRO_CONFIG0, 0x06, spiSettings);
 
-  return readRegister(PIN_CS_IMU, ICM_REG_PWR_MGMT0, spiSettings) == 0x0F &&
-         readRegister(PIN_CS_IMU, ICM_REG_ACCEL_CONFIG0, spiSettings) == 0x06 &&
-         readRegister(PIN_CS_IMU, ICM_REG_GYRO_CONFIG0, spiSettings) == 0x06;
+  boardHealth.imuConfigOk =
+    readRegister(PIN_CS_IMU, ICM_REG_PWR_MGMT0, spiSettings) == 0x0F &&
+    readRegister(PIN_CS_IMU, ICM_REG_ACCEL_CONFIG0, spiSettings) == 0x06 &&
+    readRegister(PIN_CS_IMU, ICM_REG_GYRO_CONFIG0, spiSettings) == 0x06;
+
+  return boardHealth.imuConfigOk;
 }
 
 static float magnitude3(float x, float y, float z) {
@@ -310,6 +335,7 @@ void firePyro() {
   pyroLatched = true;
   pyroPulseUntilMs = millis() + PYRO_PULSE_MS;
   digitalWrite(PIN_PYRO, HIGH);
+  flightState = FlightState::PyroFired;
 }
 
 void updatePyroOutput() {
@@ -319,6 +345,7 @@ void updatePyroOutput() {
 }
 
 void recordFaultAndSafeStop() {
+  flightState = FlightState::Fault;
   digitalWrite(PIN_PYRO, LOW);
 }
 

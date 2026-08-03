@@ -12,7 +12,23 @@ struct ImuSample {
   int16_t gz;
 };
 
+struct BoardHealth {
+  bool coreTickOk = false;
+  bool heapOk = false;
+  bool spiOk = false;
+  bool imuWhoAmIOk = false;
+  bool imuConfigOk = false;
+  bool imuStreamOk = false;
+  bool baroOk = false;
+  bool flashFsOk = false;
+  bool usbStorageOk = false;
+  bool vinOk = false;
+  bool warning = false;
+  bool critical = false;
+};
+
 extern SPISettings spiSettings;
+extern BoardHealth boardHealth;
 extern float gravityAxisX;
 extern float gravityAxisY;
 extern float gravityAxisZ;

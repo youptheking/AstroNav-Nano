@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "hardware_control.h"
 #include "usb_info_files.h"
 
 /*
@@ -19,31 +20,6 @@
  * - RAM mission log flushed to flash after landing
  * - USB mass-storage mode when powered from USB
  */
-
-// ---------------------------------------------------------
-// 1. PIN DEFINITIONS
-// ---------------------------------------------------------
-#define PIN_MISO       4
-#define PIN_SCK        6
-#define PIN_MOSI       7
-#define PIN_CS_IMU     9
-#define PIN_CS_BMP    12
-#define PIN_PYRO       1
-#define PIN_SERVO_1    2
-#define PIN_SERVO_2    3
-#define PIN_VIN_SENSE 27
-#define WS2812_PIN     0
-
-#define ICM45686_EXPECTED_ID   0xE9
-
-// ICM-45686 UI registers
-#define ICM_REG_ACCEL_DATA_X1_UI 0x00
-#define ICM_REG_GYRO_DATA_X1_UI  0x06
-#define ICM_REG_TEMP_DATA1_UI    0x0C
-#define ICM_REG_PWR_MGMT0        0x10
-#define ICM_REG_ACCEL_CONFIG0    0x1B
-#define ICM_REG_GYRO_CONFIG0     0x1C
-#define ICM_REG_REG_MISC2        0x7F
 
 static constexpr float ACCEL_LSB_PER_G = 1024.0f;
 static constexpr float GYRO_LSB_PER_DPS = 16.4f;
@@ -77,15 +53,6 @@ static constexpr uint16_t FLIGHT_LOG_CAPACITY = 2048;
 static constexpr uint32_t PROFILE_MAGIC = 0x50455246;   // "FRFP"
 static constexpr uint32_t PROFILE_VERSION = 1;
 
-struct ImuSample {
-  int16_t ax;
-  int16_t ay;
-  int16_t az;
-  int16_t gx;
-  int16_t gy;
-  int16_t gz;
-};
-
 enum class PowerMode {
   Unknown,
   USB,
@@ -116,21 +83,6 @@ enum class LedProfile {
   Warning,
   Landed,
   Fault
-};
-
-struct BoardHealth {
-  bool coreTickOk = false;
-  bool heapOk = false;
-  bool spiOk = false;
-  bool imuWhoAmIOk = false;
-  bool imuConfigOk = false;
-  bool imuStreamOk = false;
-  bool baroOk = false;
-  bool flashFsOk = false;
-  bool usbStorageOk = false;
-  bool vinOk = false;
-  bool warning = false;
-  bool critical = false;
 };
 
 struct FlightSample {
@@ -247,11 +199,20 @@ FlightSample missionLog[FLIGHT_LOG_CAPACITY];
 uint16_t missionLogCount = 0;
 
 char missionLogPath[48] = {0};
+char lastFaultReason[96] = "none";
 
 void setStatusLED(uint8_t r, uint8_t g, uint8_t b);
 void setLedProfile(LedProfile profile);
 void updateStatusLed();
 float clampFloat(float value, float minimum, float maximum);
+bool testCoreTick();
+bool testHeap();
+bool readInputVoltage(float &voltage);
+bool readBaroSample(float &temperature, float &pressureHpa);
+bool readImuFrame(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
+bool verifyImuStream();
+bool configureImu();
+bool calibratePadOrientation();
 void appendMissionSample();
 void flushMissionLogToFlash();
 void firePyro();
@@ -263,12 +224,15 @@ void ensureLogsDirectory();
 void handleSerialCommand(const char *command);
 void enterFlightModeFromUsb();
 void onUsbStorageUnplug(uint32_t cbData);
-void ensureUsbDemoFile();
-bool shouldExitUsbModeFromDemoFile();
+void ensureUsbInfoFiles();
+bool shouldExitUsbModeFromUsbFiles();
 bool loadFlightSettings();
 bool loadOrCreateDeviceProfile();
 void persistDeviceProfile();
-void writePersonalFile();
+void writeProfileIniFile();
+void writeDebugFile(const char *faultReason);
+void buildFaultReason(char *buffer, size_t bufferSize);
+uint8_t healthBits();
 bool systemHealthy();
 
 uint8_t readRegister(uint8_t csPin, uint8_t regAddr, SPISettings settings);
@@ -371,6 +335,42 @@ void makeDefaultFlightSettings() {
   applyFlightSettings();
 }
 
+void buildFaultReason(char *buffer, size_t bufferSize) {
+  buffer[0] = '\0';
+
+  auto appendReason = [&](const char *label) {
+    if (!label || !label[0]) {
+      return;
+    }
+    size_t currentLength = strlen(buffer);
+    size_t labelLength = strlen(label);
+    if (currentLength + labelLength + 2 >= bufferSize) {
+      return;
+    }
+    if (currentLength > 0) {
+      strncat(buffer, ",", bufferSize - currentLength - 1);
+    }
+    strncat(buffer, label, bufferSize - strlen(buffer) - 1);
+  };
+
+  if (!boardHealth.coreTickOk) appendReason("coreTick");
+  if (!boardHealth.heapOk) appendReason("heap");
+  if (!boardHealth.spiOk) appendReason("spi");
+  if (!boardHealth.imuWhoAmIOk) appendReason("imuWhoAmI");
+  if (!boardHealth.imuConfigOk) appendReason("imuConfig");
+  if (!boardHealth.imuStreamOk) appendReason("imuStream");
+  if (!boardHealth.baroOk) appendReason("baro");
+  if (!boardHealth.flashFsOk) appendReason("flashFs");
+  if (!boardHealth.usbStorageOk && powerMode == PowerMode::USB) appendReason("usbStorage");
+  if (!boardHealth.vinOk) appendReason("vin");
+  if (powerMode == PowerMode::Unknown) appendReason("powerMode");
+
+  if (buffer[0] == '\0') {
+    strncpy(buffer, "none", bufferSize - 1);
+    buffer[bufferSize - 1] = '\0';
+  }
+}
+
 void saveFlightSettings();
 
 bool parseBoolValue(const char *text) {
@@ -407,13 +407,21 @@ bool readSettingLine(const char *line, const char *key, char *valueBuffer, size_
   return true;
 }
 
+bool readProfileLine(const char *line, const char *key, char *valueBuffer, size_t valueBufferSize) {
+  return readSettingLine(line, key, valueBuffer, valueBufferSize);
+}
+
+void writeProfileFieldLine(File &file, const char *key, const char *value) {
+  file.printf("%s=%s\n", key, value ? value : "");
+}
+
 bool loadFlightSettings() {
-  if (!storageReady || !FatFS.exists("/SETTINGS.TXT")) {
+  if (!storageReady || !FatFS.exists("/SETTINGS.INI")) {
     makeDefaultFlightSettings();
     return false;
   }
 
-  File settingsFile = FatFS.open("/SETTINGS.TXT", "r");
+  File settingsFile = FatFS.open("/SETTINGS.INI", "r");
   if (!settingsFile) {
     makeDefaultFlightSettings();
     return false;
@@ -427,7 +435,7 @@ bool loadFlightSettings() {
     size_t length = settingsFile.readBytesUntil('\n', line, sizeof(line) - 1);
     line[length] = '\0';
 
-    if (line[0] == '#' || line[0] == ';' || line[0] == '\0') {
+    if (line[0] == '#' || line[0] == ';' || line[0] == '[' || line[0] == '\0') {
       continue;
     }
 
@@ -463,24 +471,18 @@ void saveFlightSettings() {
     return;
   }
 
-  File settingsFile = FatFS.open("/SETTINGS.TXT", "w");
+  File settingsFile = FatFS.open("/SETTINGS.INI", "w");
   if (!settingsFile) {
     boardHealth.warning = true;
     return;
   }
 
-  settingsFile.println("# AstroNav Nano flight settings");
-  settingsFile.println("# Edit the values below, then save the file.");
-  settingsFile.println("# ESTIMATED_HEIGHT_M: expected apogee height used to tune apogee detection.");
-  settingsFile.println("# HEIGHT_MARGIN_M: height safety margin added around the estimate.");
-  settingsFile.println("# ESTIMATED_SPEED_MPS: expected peak speed used to tune apogee detection.");
-  settingsFile.println("# SPEED_MARGIN_MPS: speed safety margin added around the estimate.");
-  settingsFile.println("# LAUNCH_THRESHOLD_G: acceleration threshold used to confirm liftoff.");
-  settingsFile.printf("ESTIMATED_HEIGHT_M=%.1f\n", flightSettings.estimatedHeightM);
-  settingsFile.printf("HEIGHT_MARGIN_M=%.1f\n", flightSettings.heightMarginM);
-  settingsFile.printf("ESTIMATED_SPEED_MPS=%.1f\n", flightSettings.estimatedSpeedMps);
-  settingsFile.printf("SPEED_MARGIN_MPS=%.1f\n", flightSettings.speedMarginMps);
-  settingsFile.printf("LAUNCH_THRESHOLD_G=%.2f\n", flightSettings.launchThresholdG);
+  UsbInfoFiles::writeSettingsIni(settingsFile,
+                                 flightSettings.estimatedHeightM,
+                                 flightSettings.estimatedSpeedMps,
+                                 flightSettings.heightMarginM,
+                                 flightSettings.speedMarginMps,
+                                 flightSettings.launchThresholdG);
   settingsFile.flush();
   settingsFile.close();
 }
@@ -499,29 +501,74 @@ void updateDeviceProfileChecksum() {
 }
 
 bool loadOrCreateDeviceProfile() {
-  if (!storageReady || !FatFS.exists("/PROFILE.BIN")) {
+  if (!storageReady || !FatFS.exists("/PROFILE.INI")) {
     makeDefaultDeviceProfile();
     updateDeviceProfileChecksum();
     return false;
   }
 
-  File profileFile = FatFS.open("/PROFILE.BIN", "r");
+  File profileFile = FatFS.open("/PROFILE.INI", "r");
   if (!profileFile) {
     makeDefaultDeviceProfile();
     updateDeviceProfileChecksum();
     return false;
   }
 
-  if (profileFile.read(reinterpret_cast<uint8_t *>(&deviceProfile), sizeof(deviceProfile)) != sizeof(deviceProfile)) {
-    profileFile.close();
-    makeDefaultDeviceProfile();
-    updateDeviceProfileChecksum();
-    return false;
+  makeDefaultDeviceProfile();
+  bool anyValue = false;
+  bool checksumPresent = false;
+  uint32_t expectedChecksum = 0;
+  char line[160];
+
+  while (profileFile.available()) {
+    size_t length = profileFile.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[length] = '\0';
+
+    if (line[0] == '#' || line[0] == ';' || line[0] == '[' || line[0] == '\0') {
+      continue;
+    }
+
+    char value[96];
+    if (readProfileLine(line, "MAGIC", value, sizeof(value))) {
+      deviceProfile.magic = static_cast<uint32_t>(strtoul(value, nullptr, 16));
+      anyValue = true;
+    } else if (readProfileLine(line, "VERSION", value, sizeof(value))) {
+      deviceProfile.version = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+      anyValue = true;
+    } else if (readProfileLine(line, "SERIAL_NUMBER", value, sizeof(value))) {
+      strncpy(deviceProfile.serialNumber, value, sizeof(deviceProfile.serialNumber) - 1);
+      deviceProfile.serialNumber[sizeof(deviceProfile.serialNumber) - 1] = '\0';
+      anyValue = true;
+    } else if (readProfileLine(line, "FLASH_STAMP", value, sizeof(value))) {
+      strncpy(deviceProfile.flashStamp, value, sizeof(deviceProfile.flashStamp) - 1);
+      deviceProfile.flashStamp[sizeof(deviceProfile.flashStamp) - 1] = '\0';
+      anyValue = true;
+    } else if (readProfileLine(line, "FLIGHT_COUNT", value, sizeof(value))) {
+      deviceProfile.flightCount = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+      anyValue = true;
+    } else if (readProfileLine(line, "LOG_COUNT", value, sizeof(value))) {
+      deviceProfile.logCount = static_cast<uint32_t>(strtoul(value, nullptr, 10));
+      anyValue = true;
+    } else if (readProfileLine(line, "MAX_FLIGHT_ALTITUDE_M", value, sizeof(value))) {
+      deviceProfile.maxFlightAltitudeM = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readProfileLine(line, "MAX_FLIGHT_SPEED_MPS", value, sizeof(value))) {
+      deviceProfile.maxFlightSpeedMps = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readProfileLine(line, "LAST_FLIGHT_ALTITUDE_M", value, sizeof(value))) {
+      deviceProfile.lastFlightAltitudeM = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readProfileLine(line, "LAST_FLIGHT_SPEED_MPS", value, sizeof(value))) {
+      deviceProfile.lastFlightSpeedMps = static_cast<float>(atof(value));
+      anyValue = true;
+    } else if (readProfileLine(line, "CHECKSUM", value, sizeof(value))) {
+      expectedChecksum = static_cast<uint32_t>(strtoul(value, nullptr, 16));
+      checksumPresent = true;
+    }
   }
+
   profileFile.close();
 
-  uint32_t expectedChecksum = deviceProfile.checksum;
-  uint32_t savedChecksum = deviceProfile.checksum;
   deviceProfile.checksum = 0;
   if (deviceProfile.magic != PROFILE_MAGIC || deviceProfile.version != PROFILE_VERSION) {
     makeDefaultDeviceProfile();
@@ -530,7 +577,7 @@ bool loadOrCreateDeviceProfile() {
   }
 
   uint32_t computedChecksum = checksumBytes(reinterpret_cast<const uint8_t *>(&deviceProfile), sizeof(deviceProfile) - sizeof(deviceProfile.checksum));
-  if (computedChecksum != expectedChecksum || savedChecksum == 0) {
+  if (!anyValue || !checksumPresent || computedChecksum != expectedChecksum) {
     makeDefaultDeviceProfile();
     updateDeviceProfileChecksum();
     return false;
@@ -546,42 +593,87 @@ void persistDeviceProfile() {
   }
 
   updateDeviceProfileChecksum();
-  File profileFile = FatFS.open("/PROFILE.BIN", "w");
+  File profileFile = FatFS.open("/PROFILE.INI", "w");
   if (!profileFile) {
     boardHealth.warning = true;
     return;
   }
 
-  profileFile.write(reinterpret_cast<const uint8_t *>(&deviceProfile), sizeof(deviceProfile));
+  profileFile.println("[profile]");
+  writeProfileFieldLine(profileFile, "MAGIC", "50455246");
+  profileFile.printf("VERSION=%lu\n", static_cast<unsigned long>(deviceProfile.version));
+  writeProfileFieldLine(profileFile, "SERIAL_NUMBER", deviceProfile.serialNumber);
+  writeProfileFieldLine(profileFile, "FLASH_STAMP", deviceProfile.flashStamp);
+  profileFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
+  profileFile.printf("LOG_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
+  profileFile.printf("MAX_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.maxFlightAltitudeM);
+  profileFile.printf("MAX_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.maxFlightSpeedMps);
+  profileFile.printf("LAST_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.lastFlightAltitudeM);
+  profileFile.printf("LAST_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.lastFlightSpeedMps);
+  profileFile.printf("CHECKSUM=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
   profileFile.flush();
   profileFile.close();
 }
 
-void writePersonalFile() {
+void writeProfileIniFile() {
   if (!storageReady) {
     return;
   }
 
-  File personalFile = FatFS.open("/PERSONAL.TXT", "w");
-  if (!personalFile) {
+  File profileFile = FatFS.open("/PROFILE.INI", "w");
+  if (!profileFile) {
     boardHealth.warning = true;
     return;
   }
 
-  personalFile.println("AstroNav Nano Personal Data");
-  personalFile.println("This is a text copy of the flash-backed profile data.");
-  personalFile.println();
-  personalFile.printf("FlashStamp=%s\n", deviceProfile.flashStamp);
-  personalFile.printf("SerialNumber=%s\n", deviceProfile.serialNumber);
-  personalFile.printf("FlightCount=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
-  personalFile.printf("LogCount=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
-  personalFile.printf("MaxFlightAltitudeM=%.1f\n", deviceProfile.maxFlightAltitudeM);
-  personalFile.printf("MaxFlightSpeedMps=%.1f\n", deviceProfile.maxFlightSpeedMps);
-  personalFile.printf("LastFlightAltitudeM=%.1f\n", deviceProfile.lastFlightAltitudeM);
-  personalFile.printf("LastFlightSpeedMps=%.1f\n", deviceProfile.lastFlightSpeedMps);
-  personalFile.printf("ProfileChecksum=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
-  personalFile.flush();
-  personalFile.close();
+  profileFile.println("[profile]");
+  writeProfileFieldLine(profileFile, "MAGIC", "50455246");
+  profileFile.printf("VERSION=%lu\n", static_cast<unsigned long>(deviceProfile.version));
+  writeProfileFieldLine(profileFile, "SERIAL_NUMBER", deviceProfile.serialNumber);
+  writeProfileFieldLine(profileFile, "FLASH_STAMP", deviceProfile.flashStamp);
+  profileFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
+  profileFile.printf("LOG_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
+  profileFile.printf("MAX_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.maxFlightAltitudeM);
+  profileFile.printf("MAX_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.maxFlightSpeedMps);
+  profileFile.printf("LAST_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.lastFlightAltitudeM);
+  profileFile.printf("LAST_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.lastFlightSpeedMps);
+  profileFile.printf("CHECKSUM=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
+  profileFile.flush();
+  profileFile.close();
+}
+
+void writeDebugFile(const char *faultReason) {
+  if (!storageReady) {
+    return;
+  }
+
+  File debugFile = FatFS.open("/DEBUG.INI", "w");
+  if (!debugFile) {
+    boardHealth.warning = true;
+    return;
+  }
+
+  UsbInfoFiles::writeDebugIni(debugFile,
+                              faultReason,
+                              boardHealth.coreTickOk,
+                              boardHealth.heapOk,
+                              boardHealth.spiOk,
+                              boardHealth.imuWhoAmIOk,
+                              boardHealth.imuConfigOk,
+                              boardHealth.imuStreamOk,
+                              boardHealth.baroOk,
+                              boardHealth.flashFsOk,
+                              boardHealth.usbStorageOk,
+                              boardHealth.vinOk,
+                              boardHealth.warning,
+                              boardHealth.critical,
+                              currentVinVoltage,
+                              healthBits(),
+                              runtimeModeText(),
+                              stateText(flightState),
+                              powerModeText(powerMode));
+  debugFile.flush();
+  debugFile.close();
 }
 
 float clampFloat(float value, float minimum, float maximum) {
@@ -613,248 +705,8 @@ bool systemHealthy() {
          boardHealth.baroOk && !boardHealth.critical;
 }
 
-bool testCoreTick() {
-  uint32_t start = millis();
-  delay(2);
-  return millis() > start;
-}
-
-bool testHeap() {
-  const size_t testSize = 256;
-  uint8_t *buffer = static_cast<uint8_t *>(malloc(testSize));
-  if (buffer == nullptr) {
-    return false;
-  }
-
-  for (size_t i = 0; i < testSize; i++) {
-    buffer[i] = static_cast<uint8_t>(i ^ 0x5A);
-  }
-
-  bool ok = buffer[0] == 0x5A && buffer[1] == 0x5B && buffer[255] == static_cast<uint8_t>(255 ^ 0x5A);
-  free(buffer);
-  return ok;
-}
-
-bool readInputVoltage(float &voltage) {
-  const int samples = 8;
-  uint32_t total = 0;
-
-  for (int i = 0; i < samples; i++) {
-    total += static_cast<uint32_t>(analogRead(PIN_VIN_SENSE));
-    delay(1);
-  }
-
-  float averageCounts = static_cast<float>(total) / static_cast<float>(samples);
-  float senseVoltage = averageCounts * ADC_VREF / ADC_COUNTS;
-  voltage = senseVoltage * VIN_DIVIDER_RATIO;
-  return voltage > 0.1f;
-}
-
-bool readBaroSample(float &temperature, float &pressureHpa) {
-  bmp5_sensor_data data = {0};
-  if (baro.getSensorData(&data) != BMP5_OK) {
-    return false;
-  }
-
-  temperature = data.temperature;
-  pressureHpa = data.pressure / 100.0f;
-  return pressureHpa > 300.0f && pressureHpa < 1200.0f;
-}
-
-bool readImuFrame(float &ax, float &ay, float &az, float &gx, float &gy, float &gz) {
-  uint8_t rawData[12] = {0};
-
-  for (int attempt = 0; attempt < 4; attempt++) {
-    digitalWrite(PIN_CS_IMU, LOW);
-    SPI.beginTransaction(spiSettings);
-    SPI.transfer(ICM_REG_ACCEL_DATA_X1_UI | 0x80);
-    for (int i = 0; i < 12; i++) {
-      rawData[i] = SPI.transfer(0x00);
-    }
-    SPI.endTransaction();
-    digitalWrite(PIN_CS_IMU, HIGH);
-
-    bool allZero = true;
-    bool allFF = true;
-    for (int i = 0; i < 12; i++) {
-      if (rawData[i] != 0x00) {
-        allZero = false;
-      }
-      if (rawData[i] != 0xFF) {
-        allFF = false;
-      }
-    }
-
-    if (!allZero && !allFF) {
-      ImuSample sample = decodeSample(rawData);
-      ax = static_cast<float>(sample.ax) / ACCEL_LSB_PER_G;
-      ay = static_cast<float>(sample.ay) / ACCEL_LSB_PER_G;
-      az = static_cast<float>(sample.az) / ACCEL_LSB_PER_G;
-      gx = static_cast<float>(sample.gx) / GYRO_LSB_PER_DPS;
-      gy = static_cast<float>(sample.gy) / GYRO_LSB_PER_DPS;
-      gz = static_cast<float>(sample.gz) / GYRO_LSB_PER_DPS;
-      return true;
-    }
-
-    delay(2);
-  }
-
-  return false;
-}
-
-bool verifyImuStream() {
-  const int samples = 8;
-  int validSamples = 0;
-  float ax = 0.0f;
-  float ay = 0.0f;
-  float az = 0.0f;
-  float gx = 0.0f;
-  float gy = 0.0f;
-  float gz = 0.0f;
-
-  for (int i = 0; i < samples; i++) {
-    if (readImuFrame(ax, ay, az, gx, gy, gz)) {
-      if (isfinite(ax) && isfinite(ay) && isfinite(az) && isfinite(gx) && isfinite(gy) && isfinite(gz)) {
-        validSamples++;
-      }
-    }
-    delay(2);
-  }
-
-  return validSamples >= 6;
-}
-
-bool configureImu() {
-  bool transportOk = false;
-  uint8_t whoAmI = 0;
-
-  for (size_t i = 0; i < 2; i++) {
-    uint8_t value = readRegister(PIN_CS_IMU, 0x72, (i == 0)
-      ? SPISettings(500000, MSBFIRST, SPI_MODE3)
-      : SPISettings(500000, MSBFIRST, SPI_MODE0));
-    if (value != 0x00 && value != 0xFF) {
-      spiSettings = (i == 0)
-        ? SPISettings(500000, MSBFIRST, SPI_MODE3)
-        : SPISettings(500000, MSBFIRST, SPI_MODE0);
-      whoAmI = value;
-      transportOk = true;
-      break;
-    }
-  }
-
-  boardHealth.spiOk = transportOk;
-  boardHealth.imuWhoAmIOk = transportOk && (whoAmI == ICM45686_EXPECTED_ID);
-
-  if (!boardHealth.imuWhoAmIOk) {
-    return false;
-  }
-
-  writeRegister(PIN_CS_IMU, ICM_REG_REG_MISC2, 0x02, spiSettings);
-  delay(5);
-  writeRegister(PIN_CS_IMU, ICM_REG_PWR_MGMT0, 0x0F, spiSettings);
-  writeRegister(PIN_CS_IMU, ICM_REG_ACCEL_CONFIG0, 0x06, spiSettings);
-  writeRegister(PIN_CS_IMU, ICM_REG_GYRO_CONFIG0, 0x06, spiSettings);
-
-  boardHealth.imuConfigOk =
-    readRegister(PIN_CS_IMU, ICM_REG_PWR_MGMT0, spiSettings) == 0x0F &&
-    readRegister(PIN_CS_IMU, ICM_REG_ACCEL_CONFIG0, spiSettings) == 0x06 &&
-    readRegister(PIN_CS_IMU, ICM_REG_GYRO_CONFIG0, spiSettings) == 0x06;
-
-  return boardHealth.imuConfigOk;
-}
-
 float magnitude3(float x, float y, float z) {
   return sqrtf((x * x) + (y * y) + (z * z));
-}
-
-bool calibratePadOrientation() {
-  uint32_t deadline = millis() + CALIBRATION_TIMEOUT_MS;
-  uint8_t stableCount = 0;
-  float accelSumX = 0.0f;
-  float accelSumY = 0.0f;
-  float accelSumZ = 0.0f;
-  float gyroSumX = 0.0f;
-  float gyroSumY = 0.0f;
-  float gyroSumZ = 0.0f;
-  float temperatureSum = 0.0f;
-  float pressureSum = 0.0f;
-
-  while (millis() < deadline) {
-    float ax = 0.0f;
-    float ay = 0.0f;
-    float az = 0.0f;
-    float gx = 0.0f;
-    float gy = 0.0f;
-    float gz = 0.0f;
-    float temp = 0.0f;
-    float pressure = 0.0f;
-
-    bool imuOk = readImuFrame(ax, ay, az, gx, gy, gz);
-    bool baroOk = readBaroSample(temp, pressure);
-    if (!imuOk || !baroOk) {
-      stableCount = 0;
-      accelSumX = accelSumY = accelSumZ = 0.0f;
-      gyroSumX = gyroSumY = gyroSumZ = 0.0f;
-      temperatureSum = 0.0f;
-      pressureSum = 0.0f;
-      delay(40);
-      continue;
-    }
-
-    float accelMag = magnitude3(ax, ay, az);
-    float gyroMag = magnitude3(gx, gy, gz);
-    if (fabsf(accelMag - 1.0f) <= STATIONARY_ACCEL_TOLERANCE_G &&
-        gyroMag <= STATIONARY_GYRO_TOLERANCE_DPS) {
-      accelSumX += ax;
-      accelSumY += ay;
-      accelSumZ += az;
-      gyroSumX += gx;
-      gyroSumY += gy;
-      gyroSumZ += gz;
-      temperatureSum += temp;
-      pressureSum += pressure;
-      stableCount++;
-
-      if (stableCount >= CALIBRATION_GOOD_SAMPLES) {
-        float invCount = 1.0f / static_cast<float>(stableCount);
-        gravityAxisX = accelSumX * invCount;
-        gravityAxisY = accelSumY * invCount;
-        gravityAxisZ = accelSumZ * invCount;
-        float gravityMag = magnitude3(gravityAxisX, gravityAxisY, gravityAxisZ);
-        if (gravityMag > 0.01f) {
-          gravityAxisX /= gravityMag;
-          gravityAxisY /= gravityMag;
-          gravityAxisZ /= gravityMag;
-        } else {
-          gravityAxisX = 0.0f;
-          gravityAxisY = 0.0f;
-          gravityAxisZ = 1.0f;
-        }
-
-        gyroBiasX = gyroSumX * invCount;
-        gyroBiasY = gyroSumY * invCount;
-        gyroBiasZ = gyroSumZ * invCount;
-        filteredTemperature = temperatureSum * invCount;
-        filteredPressure = pressureSum * invCount;
-        baselinePressureHpa = filteredPressure;
-        filteredAltitude = 0.0f;
-        peakAltitude = 0.0f;
-        lastAltitudeForVelocity = 0.0f;
-        currentVerticalVelocity = 0.0f;
-        return true;
-      }
-    } else {
-      stableCount = 0;
-      accelSumX = accelSumY = accelSumZ = 0.0f;
-      gyroSumX = gyroSumY = gyroSumZ = 0.0f;
-      temperatureSum = 0.0f;
-      pressureSum = 0.0f;
-    }
-
-    delay(40);
-  }
-
-  return false;
 }
 
 float altitudeFromPressure(float pressureHpa) {
@@ -921,36 +773,56 @@ void ensureLogsDirectory() {
   FatFS.mkdir("/logs");
 }
 
-void ensureUsbDemoFile() {
+void cleanupLegacyUsbFiles() {
   if (!storageReady) {
     return;
   }
 
-  File howToFile = FatFS.open("/HOWTO.TXT", "w");
+  FatFS.remove("/USB_MODE_DEMO");
+  FatFS.remove("/USB_MODE_DEMO.TXT");
+  FatFS.remove("/USB_MODE_DEMO.INI");
+  FatFS.remove("/HOWTO.TXT");
+  FatFS.remove("/PERSONAL.TXT");
+  FatFS.remove("/PROFILE.BIN");
+  FatFS.remove("/SETTINGS.TXT");
+  FatFS.remove("/WEBSITE.TXT");
+}
+
+void ensureUsbInfoFiles() {
+  if (!storageReady) {
+    return;
+  }
+
+  cleanupLegacyUsbFiles();
+
+  File howToFile = FatFS.open("/HOWTO.INI", "w");
   if (!howToFile) {
     boardHealth.warning = true;
     return;
   }
 
-  UsbInfoFiles::writeHowto(howToFile);
+  UsbInfoFiles::writeHowtoIni(howToFile);
   howToFile.flush();
   howToFile.close();
 
-  File websiteFile = FatFS.open("/WEBSITE.TXT", "w");
+  File websiteFile = FatFS.open("/WEBSITE.URL", "w");
   if (!websiteFile) {
     boardHealth.warning = true;
     return;
   }
 
-  UsbInfoFiles::writeWebsite(websiteFile);
+  UsbInfoFiles::writeWebsiteShortcut(websiteFile);
   websiteFile.flush();
   websiteFile.close();
 
-  if (!FatFS.exists("/SETTINGS.TXT")) {
+  if (!FatFS.exists("/SETTINGS.INI")) {
     saveFlightSettings();
   }
 
-  writePersonalFile();
+  writeProfileIniFile();
+
+  buildFaultReason(lastFaultReason, sizeof(lastFaultReason));
+  writeDebugFile(lastFaultReason);
 }
 
 void onUsbStorageUnplug(uint32_t cbData) {
@@ -960,7 +832,7 @@ void onUsbStorageUnplug(uint32_t cbData) {
   }
 }
 
-bool shouldExitUsbModeFromDemoFile() {
+bool shouldExitUsbModeFromUsbFiles() {
   if (!storageReady) {
     return false;
   }
@@ -1163,23 +1035,6 @@ void printRuntimeSummary() {
                 boolText(systemHealthy()));
 }
 
-void firePyro() {
-  if (pyroLatched) {
-    return;
-  }
-
-  pyroLatched = true;
-  pyroPulseUntilMs = millis() + PYRO_PULSE_MS;
-  digitalWrite(PIN_PYRO, HIGH);
-  flightState = FlightState::PyroFired;
-}
-
-void updatePyroOutput() {
-  if (pyroLatched && digitalRead(PIN_PYRO) == HIGH && millis() >= pyroPulseUntilMs) {
-    digitalWrite(PIN_PYRO, LOW);
-  }
-}
-
 bool missionAtSafeGroundState() {
   return flightState == FlightState::Landed || flightState == FlightState::Fault;
 }
@@ -1267,11 +1122,6 @@ void updateFlightStateFromSamples() {
   }
 }
 
-void recordFaultAndSafeStop() {
-  flightState = FlightState::Fault;
-  digitalWrite(PIN_PYRO, LOW);
-}
-
 void setup() {
   Serial.begin(115200);
   led.begin();
@@ -1351,7 +1201,7 @@ void setup() {
     if (!usbDriveReady) {
       boardHealth.warning = true;
     }
-    ensureUsbDemoFile();
+    ensureUsbInfoFiles();
   }
 
   if (!boardHealth.coreTickOk || !boardHealth.heapOk || !boardHealth.spiOk ||
@@ -1385,7 +1235,7 @@ void setup() {
 
   if (storageReady) {
     if (powerMode == PowerMode::USB && !usbFlightOverride) {
-      writePersonalFile();
+      writeProfileIniFile();
     } else {
       persistDeviceProfile();
     }
@@ -1411,7 +1261,7 @@ void loop() {
     }
   }
 
-  if (powerMode == PowerMode::USB && !usbFlightOverride && shouldExitUsbModeFromDemoFile()) {
+  if (powerMode == PowerMode::USB && !usbFlightOverride && shouldExitUsbModeFromUsbFiles()) {
     enterFlightModeFromUsb();
   }
 
@@ -1484,41 +1334,3 @@ void loop() {
   delay(1);
 }
 
-uint8_t readRegister(uint8_t csPin, uint8_t regAddr, SPISettings settings) {
-  uint8_t value = 0;
-  digitalWrite(csPin, LOW);
-  SPI.beginTransaction(settings);
-  SPI.transfer(regAddr | 0x80);
-  value = SPI.transfer(0x00);
-  SPI.endTransaction();
-  digitalWrite(csPin, HIGH);
-  return value;
-}
-
-uint8_t readRegister(uint8_t csPin, uint8_t regAddr) {
-  return readRegister(csPin, regAddr, spiSettings);
-}
-
-void writeRegister(uint8_t csPin, uint8_t regAddr, uint8_t value, SPISettings settings) {
-  digitalWrite(csPin, LOW);
-  SPI.beginTransaction(settings);
-  SPI.transfer(regAddr & 0x7F);
-  SPI.transfer(value);
-  SPI.endTransaction();
-  digitalWrite(csPin, HIGH);
-}
-
-void writeRegister(uint8_t csPin, uint8_t regAddr, uint8_t value) {
-  writeRegister(csPin, regAddr, value, spiSettings);
-}
-
-ImuSample decodeSample(const uint8_t *rawData) {
-  ImuSample sample;
-  sample.ax = static_cast<int16_t>((rawData[1] << 8) | rawData[0]);
-  sample.ay = static_cast<int16_t>((rawData[3] << 8) | rawData[2]);
-  sample.az = static_cast<int16_t>((rawData[5] << 8) | rawData[4]);
-  sample.gx = static_cast<int16_t>((rawData[7] << 8) | rawData[6]);
-  sample.gy = static_cast<int16_t>((rawData[9] << 8) | rawData[8]);
-  sample.gz = static_cast<int16_t>((rawData[11] << 8) | rawData[10]);
-  return sample;
-}
