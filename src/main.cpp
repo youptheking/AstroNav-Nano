@@ -185,6 +185,7 @@ bool imuInitialized = false;
 bool storageReady = false;
 bool usbDriveReady = false;
 bool usbFlightOverride = false;
+bool usbExitRequested = false;
 bool missionLogFlushed = false;
 bool pyroLatched = false;
 bool missionStarted = false;
@@ -196,6 +197,7 @@ uint32_t nextLedMs = 0;
 uint32_t launchMs = 0;
 uint32_t pyroPulseUntilMs = 0;
 uint32_t lastLogMs = 0;
+uint32_t lastUsbSettingsPollMs = 0;
 char serialCommandBuffer[48] = {0};
 uint8_t serialCommandLength = 0;
 
@@ -259,6 +261,7 @@ void startMissionLog();
 void ensureLogsDirectory();
 void handleSerialCommand(const char *command);
 void enterFlightModeFromUsb();
+void onUsbStorageUnplug(uint32_t cbData);
 void ensureUsbDemoFile();
 bool shouldExitUsbModeFromDemoFile();
 bool loadFlightSettings();
@@ -282,7 +285,7 @@ const char *stateText(FlightState state) {
     case FlightState::Booting: return "boot";
     case FlightState::Calibrating: return "calibrating";
     case FlightState::Idle: return "idle";
-    case FlightState::UsbMode: return "usb mode";
+    case FlightState::UsbMode: return "storage";
     case FlightState::Armed: return "armed";
     case FlightState::Boost: return "boost";
     case FlightState::Coast: return "coast";
@@ -305,7 +308,7 @@ const char *powerModeText(PowerMode mode) {
 
 const char *runtimeModeText() {
   if (powerMode == PowerMode::USB && !usbFlightOverride) {
-    return "usb";
+    return "usb-storage";
   }
 
   return "flight";
@@ -471,6 +474,12 @@ void saveFlightSettings() {
 
   settingsFile.println("# AstroNav Nano flight settings");
   settingsFile.println("# Edit the values below, then save the file.");
+  settingsFile.println("# ESTIMATED_HEIGHT_M: expected apogee height used to tune apogee detection.");
+  settingsFile.println("# HEIGHT_MARGIN_M: height safety margin added around the estimate.");
+  settingsFile.println("# ESTIMATED_SPEED_MPS: expected peak speed used to tune apogee detection.");
+  settingsFile.println("# SPEED_MARGIN_MPS: speed safety margin added around the estimate.");
+  settingsFile.println("# LAUNCH_THRESHOLD_G: acceleration threshold used to confirm liftoff.");
+  settingsFile.println("# USB_EXIT: set TRUE to leave USB storage mode and enter flight mode.");
   settingsFile.printf("ESTIMATED_HEIGHT_M=%.1f\n", flightSettings.estimatedHeightM);
   settingsFile.printf("HEIGHT_MARGIN_M=%.1f\n", flightSettings.heightMarginM);
   settingsFile.printf("ESTIMATED_SPEED_MPS=%.1f\n", flightSettings.estimatedSpeedMps);
@@ -922,27 +931,42 @@ void ensureUsbDemoFile() {
     return;
   }
 
-  if (!FatFS.exists("/HOWTO.TXT")) {
-    File howToFile = FatFS.open("/HOWTO.TXT", "w");
-    if (!howToFile) {
-      boardHealth.warning = true;
-      return;
-    }
-
-    howToFile.println("AstroNav Nano USB Guide");
-    howToFile.println("Author: YoupSpace");
-    howToFile.println();
-    howToFile.println("Open SETTINGS.TXT to tune the estimated flight height and speed.");
-    howToFile.println("Change USB_EXIT=FALSE to USB_EXIT=TRUE and save SETTINGS.TXT to leave USB mode.");
-    howToFile.println("PERSONAL.TXT is copied from the flash-backed profile and is regenerated automatically.");
-    howToFile.println();
-    howToFile.println("Files:");
-    howToFile.println("- HOWTO.TXT: this guide");
-    howToFile.println("- SETTINGS.TXT: editable flight estimates and USB exit switch");
-    howToFile.println("- PERSONAL.TXT: flash-backed profile copy");
-    howToFile.flush();
-    howToFile.close();
+  File howToFile = FatFS.open("/HOWTO.TXT", "w");
+  if (!howToFile) {
+    boardHealth.warning = true;
+    return;
   }
+
+  howToFile.println("AstroNav Nano USB Guide");
+  howToFile.println("Author: YoupSpace");
+  howToFile.println();
+  howToFile.println("What is on the drive:");
+  howToFile.println("- HOWTO.TXT: user guide");
+  howToFile.println("- SETTINGS.TXT: values you can edit and save");
+  howToFile.println("- PERSONAL.TXT: read-only copy of the device profile stored in flash");
+  howToFile.println();
+  howToFile.println("How to leave USB mode:");
+  howToFile.println("1. Preferred: use Safely Remove Hardware / Eject in Windows.");
+  howToFile.println("2. Or send EXITUSB over the serial monitor.");
+  howToFile.println("3. Or change USB_EXIT=FALSE to USB_EXIT=TRUE in SETTINGS.TXT and save it.");
+  howToFile.println("4. Wait a moment for the board to switch to flight mode.");
+  howToFile.println();
+  howToFile.println("What the settings mean:");
+  howToFile.println("- ESTIMATED_HEIGHT_M: your expected apogee height in meters.");
+  howToFile.println("  Higher values make the apogee detector wait for a bigger altitude drop.");
+  howToFile.println("- HEIGHT_MARGIN_M: extra height margin around the estimate.");
+  howToFile.println("  Bigger margins make the height checks more forgiving.");
+  howToFile.println("- ESTIMATED_SPEED_MPS: your expected peak climb speed in meters per second.");
+  howToFile.println("  This helps tune the apogee speed check.");
+  howToFile.println("- SPEED_MARGIN_MPS: extra speed margin around the estimate.");
+  howToFile.println("  Bigger margins widen the safe window for speed checks.");
+  howToFile.println("- LAUNCH_THRESHOLD_G: acceleration needed before launch is confirmed.");
+  howToFile.println("  Lower values trigger earlier, higher values require a harder launch.");
+  howToFile.println("- USB_EXIT: TRUE requests exit from USB storage mode, FALSE stays in USB mode.");
+  howToFile.println();
+  howToFile.println("PERSONAL.TXT is regenerated from flash-backed data and is only for viewing.");
+  howToFile.flush();
+  howToFile.close();
 
   if (!FatFS.exists("/SETTINGS.TXT")) {
     saveFlightSettings();
@@ -951,19 +975,30 @@ void ensureUsbDemoFile() {
   writePersonalFile();
 }
 
+void onUsbStorageUnplug(uint32_t cbData) {
+  (void) cbData;
+  usbExitRequested = true;
+}
+
 bool shouldExitUsbModeFromDemoFile() {
   if (!storageReady) {
     return false;
   }
 
-  loadFlightSettings();
-  return flightSettings.usbExit;
+  uint32_t now = millis();
+  if (now - lastUsbSettingsPollMs < 250) {
+    return false;
+  }
+  lastUsbSettingsPollMs = now;
+
+  return usbExitRequested || (loadFlightSettings() && flightSettings.usbExit);
 }
 
 void enterFlightModeFromUsb() {
   usbFlightOverride = true;
+  usbExitRequested = false;
   if (usbDriveReady) {
-    FatFSUSB.end();
+    FatFSUSB.unplug();
     usbDriveReady = false;
     boardHealth.usbStorageOk = false;
   }
@@ -1067,7 +1102,7 @@ void setLedProfile(LedProfile profile) {
       scaleAndSet(255, 255, 255);
       break;
     case LedProfile::Idle:
-      scaleAndSet(0, 255, 160);
+      scaleAndSet(255, 128, 0);
       break;
     case LedProfile::IdleUsb:
       scaleAndSet(0, 128, 255);
@@ -1336,6 +1371,7 @@ void setup() {
   }
 
   if (powerMode == PowerMode::USB && storageReady && !usbFlightOverride) {
+    FatFSUSB.onUnplug(onUsbStorageUnplug);
     usbDriveReady = FatFSUSB.begin();
     boardHealth.usbStorageOk = usbDriveReady;
     if (!usbDriveReady) {
