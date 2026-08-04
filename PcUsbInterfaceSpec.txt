@@ -33,43 +33,50 @@ Settings.ini keys
   - LOG_DIRECTORY = /logs
   - LOG_PATTERN = Flight_*.csv
 - [settings]
-  - ESTIMATED_HEIGHT_M
-  - HEIGHT_MARGIN_M
-  - ESTIMATED_SPEED_MPS
-  - SPEED_MARGIN_MPS
-  - LAUNCH_THRESHOLD_G
+  - ESTIMATED_HEIGHT_M: float, expected meters, practical range 0.0 and up.
+  - HEIGHT_MARGIN_M: float, meters, clamped in firmware to 0.0 to 1000.0.
+  - ESTIMATED_SPEED_MPS: float, meters per second, practical range 0.0 and up.
+  - SPEED_MARGIN_MPS: float, meters per second, clamped in firmware to 0.0 to 1000.0.
+  - LAUNCH_THRESHOLD_G: float, g-force threshold, clamped in firmware to 1.15 to 4.00.
 - [profile]
-  - MAGIC
-  - VERSION
-  - SERIAL_NUMBER
-  - FLASH_STAMP
-  - FLIGHT_COUNT
-  - LOG_COUNT
-  - MAX_FLIGHT_ALTITUDE_M
-  - MAX_FLIGHT_SPEED_MPS
-  - LAST_FLIGHT_ALTITUDE_M
-  - LAST_FLIGHT_SPEED_MPS
-  - CHECKSUM
+  - MAGIC: 32-bit hex value, expected 50455246.
+  - VERSION: integer, expected 1.
+  - SERIAL_NUMBER: string, up to 19 visible characters plus the null terminator in firmware.
+  - FLASH_STAMP: string, up to 23 visible characters plus the null terminator in firmware.
+  - FLIGHT_COUNT: unsigned integer, 0 to 4294967295.
+  - LOG_COUNT: unsigned integer, 0 to 4294967295.
+  - MAX_FLIGHT_ALTITUDE_M: float, meters, 0.0 and up.
+  - MAX_FLIGHT_SPEED_MPS: float, meters per second, 0.0 and up.
+  - LAST_FLIGHT_ALTITUDE_M: float, meters, may be negative during descent.
+  - LAST_FLIGHT_SPEED_MPS: float, meters per second, may be negative during descent.
+  - CHECKSUM: 32-bit hex value, 8 uppercase hex digits in firmware output.
 - [debug]
-  - FAULT_REASON
-  - RUNTIME_MODE
-  - STATE
-  - POWER_MODE
-  - VIN_VOLTAGE
-  - HEALTH_BITS
-  - HEALTHY
-  - CORE_TICK_OK
-  - HEAP_OK
-  - SPI_OK
-  - IMU_WHOAMI_OK
-  - IMU_CONFIG_OK
-  - IMU_STREAM_OK
-  - BARO_OK
-  - FLASH_FS_OK
-  - USB_STORAGE_OK
-  - VIN_OK
-  - WARNING
-  - CRITICAL
+  - FAULT_REASON: string, free text or none.
+  - RUNTIME_MODE: string, expected values flight or usb-storage.
+  - STATE: string, expected values boot, calibrating, idle, storage, armed, boost, coast, pyro, landed, or fault.
+  - POWER_MODE: string, expected values Unknown, USB, 1S LiPo, or 2S LiPo.
+  - VIN_VOLTAGE: float, volts, expected around 0.0 to 8.4 depending on supply.
+  - HEALTH_BITS: unsigned integer bitfield, 0 to 255.
+  - HEALTHY: boolean, TRUE or FALSE.
+  - CORE_TICK_OK: boolean, TRUE or FALSE.
+  - HEAP_OK: boolean, TRUE or FALSE.
+  - SPI_OK: boolean, TRUE or FALSE.
+  - IMU_WHOAMI_OK: boolean, TRUE or FALSE.
+  - IMU_CONFIG_OK: boolean, TRUE or FALSE.
+  - IMU_STREAM_OK: boolean, TRUE or FALSE.
+  - BARO_OK: boolean, TRUE or FALSE.
+  - FLASH_FS_OK: boolean, TRUE or FALSE.
+  - USB_STORAGE_OK: boolean, TRUE or FALSE.
+  - VIN_OK: boolean, TRUE or FALSE.
+  - WARNING: boolean, TRUE or FALSE.
+  - CRITICAL: boolean, TRUE or FALSE.
+
+Value type guide
+- Boolean fields use TRUE or FALSE in the current firmware output. A PC UI may also accept 1/0, yes/no, or on/off when editing or importing.
+- Integer fields are unsigned unless the field description says signed or may go negative.
+- Float fields use decimal numbers with a dot separator.
+- Hex fields should be parsed as base 16.
+- Strings are plain ASCII text unless the UI layer intentionally supports more.
 
 Howto.txt behavior
 - Human-readable instructions for operators and the PC application team.
@@ -85,23 +92,24 @@ Logs
 - Each log is CSV and named like Flight_<timestamp>.csv.
 - The first row is a header.
 - Each row contains:
-  - counter
-  - ms
-  - state
-  - power
-  - ax_g
-  - ay_g
-  - az_g
-  - gx_dps
-  - gy_dps
-  - gz_dps
-  - temp_c
-  - pressure_hpa
-  - altitude_m
-  - vertical_velocity_mps
-  - roll_deg
-  - pitch_deg
-  - health_bits
+  - counter: unsigned integer sample counter.
+  - ms: unsigned integer milliseconds since boot.
+  - state: string from the state list above.
+  - power: string from the power mode list above.
+  - ax_g, ay_g, az_g: float acceleration values in g.
+  - gx_dps, gy_dps, gz_dps: float gyro values in degrees per second.
+  - temp_c: float temperature in Celsius.
+  - pressure_hpa: float pressure in hPa.
+  - altitude_m: float altitude in meters.
+  - vertical_velocity_mps: float vertical velocity in meters per second.
+  - roll_deg, pitch_deg: float orientation values in degrees.
+  - health_bits: unsigned integer bitfield, 0 to 255.
+
+Recommended UI parsing rules
+- Treat missing optional fields as unknown instead of failing the whole UI.
+- Re-read the manifest if file timestamps change.
+- Validate booleans, integers, floats, and hex values before using them.
+- Use the [files] section to locate the current filenames instead of hard-coding paths.
 
 PC software integration rules
 - Read Settings.ini first to discover the current file names and log directory.
