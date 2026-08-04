@@ -47,6 +47,14 @@ void writeWebsiteShortcut(File &file) {
   file.println("IconIndex=0");
 }
 
+void writeAutorunInf(File &file) {
+  file.println("[Autorun]");
+  file.println("label=AstroNav Nano");
+  // file.println("icon=Howto.txt");
+  file.println("action=Open AstroNav Nano");
+  file.println("open=Howto.txt");
+}
+
 void writeSettingsSection(File &file,
              float estimatedHeightM,
              float estimatedSpeedMps,

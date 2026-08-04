@@ -9,11 +9,16 @@ USB mode behavior
 - USB storage is enabled when the board is powered from USB and has not been forced back into flight mode.
 - The device can leave USB mode when the user safely ejects the drive or sends EXITUSB over the serial port.
 - The PC software should expect the drive to disconnect after exit from USB mode.
+- The USB mass-storage device identification text is controlled by the current firmware stack, but the file names below are the contract the PC software should use.
+- The USB MSC inquiry text currently identifies as AstroNav / Nano Flight / 1.0.
+- The FAT volume label is written as AstroNav Nano when the filesystem accepts it, with shorter fallbacks if the label length is rejected.
+- The root also contains autorun.inf as a best-effort Windows hint file; Windows usually ignores auto-run actions on removable USB drives.
 
 Root files
 - Settings.ini
 - Howto.txt
 - Website.url
+- autorun.inf
 - logs/
 
 Settings.ini layout
@@ -87,10 +92,16 @@ Website.url behavior
 - Standard Windows InternetShortcut file.
 - Use it as a shortcut target in the UI.
 
+autorun.inf behavior
+- Best-effort compatibility file for Windows Explorer.
+- Contains a label, icon, and open hint for AstroNav Nano.
+- Do not rely on it for execution or automation on removable USB media.
+
 Logs
 - Log files are stored under /logs.
-- Each log is CSV and named like Flight_<timestamp>.csv.
-- The first row is a header.
+- Each log is CSV and named like Flight_00000001.csv, Flight_00000002.csv, and so on.
+- The first several rows are metadata comments that start with #.
+- The first non-comment row is the CSV header.
 - Each row contains:
   - counter: unsigned integer sample counter.
   - ms: unsigned integer milliseconds since boot.

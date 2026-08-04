@@ -55,12 +55,15 @@ static constexpr uint32_t PROFILE_VERSION = 1;
 static constexpr const char *DEVICE_INFO_FILE = "/Settings.ini";
 static constexpr const char *HOWTO_FILE = "/Howto.txt";
 static constexpr const char *WEBSITE_FILE = "/Website.url";
+static constexpr const char *AUTORUN_FILE = "/autorun.inf";
+static constexpr const char *USB_VOLUME_LABEL = "AstroNav Nano";
 static constexpr const char *LEGACY_SETTINGS_FILE = "/SETTINGS.INI";
 static constexpr const char *LEGACY_PROFILE_FILE = "/PROFILE.INI";
 static constexpr const char *LEGACY_DEBUG_FILE = "/DEBUG.INI";
 static constexpr const char *LEGACY_HOWTO_FILE = "/HOWTO.INI";
 static constexpr const char *LEGACY_HOWTO_TEXT_FILE = "/HOWTO.TXT";
 static constexpr const char *LEGACY_WEBSITE_FILE = "/WEBSITE.URL";
+static constexpr const char *LEGACY_AUTORUN_FILE = "/AUTORUN.INF";
 static constexpr const char *SECTION_FILES = "files";
 static constexpr const char *SECTION_SETTINGS = "settings";
 static constexpr const char *SECTION_PROFILE = "profile";
@@ -210,6 +213,7 @@ DeviceProfile deviceProfile;
 
 FlightSample missionLog[FLIGHT_LOG_CAPACITY];
 uint16_t missionLogCount = 0;
+uint32_t currentFlightNumber = 0;
 
 char missionLogPath[48] = {0};
 char lastFaultReason[96] = "none";
@@ -217,6 +221,7 @@ char lastFaultReason[96] = "none";
 void setStatusLED(uint8_t r, uint8_t g, uint8_t b);
 void setLedProfile(LedProfile profile);
 void updateStatusLed();
+bool setFlightState(FlightState nextState);
 float clampFloat(float value, float minimum, float maximum);
 bool testCoreTick();
 bool testHeap();
@@ -238,6 +243,7 @@ void handleSerialCommand(const char *command);
 void enterFlightModeFromUsb();
 void onUsbStorageUnplug(uint32_t cbData);
 void ensureUsbInfoFiles();
+bool configureUsbVolumeLabel();
 bool shouldExitUsbModeFromUsbFiles();
 bool loadFlightSettings();
 bool loadOrCreateDeviceProfile();
@@ -270,6 +276,57 @@ const char *stateText(FlightState state) {
     case FlightState::Fault:
     default: return "fault";
   }
+}
+
+bool setFlightState(FlightState nextState) {
+  if (flightState == nextState) {
+    return true;
+  }
+
+  bool allowed = false;
+  switch (flightState) {
+    case FlightState::Booting:
+      allowed = (nextState == FlightState::Calibrating || nextState == FlightState::UsbMode || nextState == FlightState::Fault);
+      break;
+    case FlightState::Calibrating:
+      allowed = (nextState == FlightState::Idle || nextState == FlightState::Fault);
+      break;
+    case FlightState::Idle:
+      allowed = (nextState == FlightState::Boost || nextState == FlightState::UsbMode || nextState == FlightState::Fault);
+      break;
+    case FlightState::UsbMode:
+      allowed = (nextState == FlightState::Calibrating || nextState == FlightState::Fault);
+      break;
+    case FlightState::Armed:
+      allowed = (nextState == FlightState::Boost || nextState == FlightState::Fault);
+      break;
+    case FlightState::Boost:
+      allowed = (nextState == FlightState::Coast || nextState == FlightState::PyroFired || nextState == FlightState::Fault);
+      break;
+    case FlightState::Coast:
+      allowed = (nextState == FlightState::PyroFired || nextState == FlightState::Landed || nextState == FlightState::Fault);
+      break;
+    case FlightState::PyroFired:
+      allowed = (nextState == FlightState::Landed || nextState == FlightState::Fault);
+      break;
+    case FlightState::Landed:
+      allowed = (nextState == FlightState::Fault);
+      break;
+    case FlightState::Fault:
+    default:
+      allowed = (nextState == FlightState::Fault);
+      break;
+  }
+
+  if (!allowed) {
+    boardHealth.warning = true;
+    strncpy(lastFaultReason, "stateTransition", sizeof(lastFaultReason) - 1);
+    lastFaultReason[sizeof(lastFaultReason) - 1] = '\0';
+    return false;
+  }
+
+  flightState = nextState;
+  return true;
 }
 
 const char *powerModeText(PowerMode mode) {
@@ -758,11 +815,14 @@ uint8_t healthBits() {
 }
 
 void startMissionLog() {
-  snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(bootMs));
+  currentFlightNumber = deviceProfile.flightCount + 1;
+  deviceProfile.flightCount = currentFlightNumber;
+  snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(currentFlightNumber));
   missionLogCount = 0;
   missionStarted = true;
   missionLogFlushed = false;
   logCounter = 0;
+  persistDeviceProfile();
 }
 
 void appendMissionSample() {
@@ -817,8 +877,21 @@ void cleanupLegacyUsbFiles() {
   FatFS.remove(LEGACY_PROFILE_FILE);
   FatFS.remove(LEGACY_DEBUG_FILE);
   FatFS.remove(LEGACY_WEBSITE_FILE);
+  FatFS.remove(LEGACY_AUTORUN_FILE);
   FatFS.remove("/SETTINGS.TXT");
   FatFS.remove("/WEBSITE.TXT");
+}
+
+bool configureUsbVolumeLabel() {
+  if (!storageReady) {
+    return false;
+  }
+
+  fatfs::f_setlabel(USB_VOLUME_LABEL);
+  fatfs::f_setlabel("AstroNavNano");
+  fatfs::f_setlabel("AstroNav");
+
+  return true;
 }
 
 void ensureUsbInfoFiles() {
@@ -837,6 +910,16 @@ void ensureUsbInfoFiles() {
   UsbInfoFiles::writeHowtoText(howToFile);
   howToFile.flush();
   howToFile.close();
+
+  File autorunFile = FatFS.open(AUTORUN_FILE, "w");
+  if (!autorunFile) {
+    boardHealth.warning = true;
+    return;
+  }
+
+  UsbInfoFiles::writeAutorunInf(autorunFile);
+  autorunFile.flush();
+  autorunFile.close();
 
   File websiteFile = FatFS.open(WEBSITE_FILE, "w");
   if (!websiteFile) {
@@ -875,15 +958,15 @@ void enterFlightModeFromUsb() {
     boardHealth.usbStorageOk = false;
   }
 
-  flightState = FlightState::Calibrating;
+  setFlightState(FlightState::Calibrating);
   if (calibratePadOrientation()) {
-    flightState = FlightState::Idle;
+    setFlightState(FlightState::Idle);
     startMissionLog();
     appendMissionSample();
   } else {
     boardHealth.critical = true;
     recordFaultAndSafeStop();
-    flightState = FlightState::Fault;
+    setFlightState(FlightState::Fault);
   }
 }
 
@@ -921,6 +1004,11 @@ void flushMissionLogToFlash() {
     return;
   }
 
+  logFile.println("# AstroNav Nano Flight Log");
+  logFile.printf("# Flight Number: %lu\n", static_cast<unsigned long>(currentFlightNumber));
+  logFile.printf("# Boot Time Ms: %lu\n", static_cast<unsigned long>(bootMs));
+  logFile.printf("# Samples: %u\n", missionLogCount);
+  logFile.println("# Columns: counter,ms,state,power,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,temp_c,pressure_hpa,altitude_m,vertical_velocity_mps,roll_deg,pitch_deg,health_bits");
   logFile.println("counter,ms,state,power,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,temp_c,pressure_hpa,altitude_m,vertical_velocity_mps,roll_deg,pitch_deg,health_bits");
   char line[192];
   for (uint16_t i = 0; i < missionLogCount; i++) {
@@ -1103,11 +1191,11 @@ void updateFlightStateFromSamples() {
       launchConfirmCount = 0;
       apogeeConfirmCount = 0;
       landingConfirmCount = 0;
-      flightState = FlightState::Boost;
+      setFlightState(FlightState::Boost);
     }
   } else if (flightState == FlightState::Boost || flightState == FlightState::Coast) {
     if (flightState == FlightState::Boost && accelMag < 1.15f) {
-      flightState = FlightState::Coast;
+      setFlightState(FlightState::Coast);
     }
 
     bool apogeeCandidate = (peakAltitude - currentAltitude) >= flightApogeeDropM &&
@@ -1143,7 +1231,7 @@ void updateFlightStateFromSamples() {
     }
 
     if (landingConfirmCount >= LANDING_CONFIRM_SAMPLES) {
-      flightState = FlightState::Landed;
+      setFlightState(FlightState::Landed);
     }
   }
 }
@@ -1215,6 +1303,7 @@ void setup() {
   storageReady = FatFS.begin();
   boardHealth.flashFsOk = storageReady;
   if (storageReady) {
+    configureUsbVolumeLabel();
     ensureLogsDirectory();
     loadFlightSettings();
     loadOrCreateDeviceProfile();
@@ -1245,17 +1334,17 @@ void setup() {
   printStartupSummary();
 
   if (boardHealth.critical) {
-    flightState = FlightState::Fault;
+    setFlightState(FlightState::Fault);
   } else if (powerMode == PowerMode::USB && !usbFlightOverride) {
-    flightState = FlightState::UsbMode;
+    setFlightState(FlightState::UsbMode);
   } else {
-    flightState = FlightState::Calibrating;
+    setFlightState(FlightState::Calibrating);
     if (!calibratePadOrientation()) {
       boardHealth.critical = true;
       recordFaultAndSafeStop();
-      flightState = FlightState::Fault;
+      setFlightState(FlightState::Fault);
     } else {
-      flightState = FlightState::Idle;
+      setFlightState(FlightState::Idle);
     }
   }
 
@@ -1295,7 +1384,7 @@ void loop() {
   updatePyroOutput();
 
   if (boardHealth.critical) {
-    flightState = FlightState::Fault;
+    setFlightState(FlightState::Fault);
   }
 
   if (now >= nextSampleMs) {

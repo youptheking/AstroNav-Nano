@@ -6,6 +6,7 @@
 namespace UsbInfoFiles {
 void writeHowtoText(File &file);
 void writeWebsiteShortcut(File &file);
+void writeAutorunInf(File &file);
 void writeSettingsSection(File &file,
 					   float estimatedHeightM,
 					   float estimatedSpeedMps,
