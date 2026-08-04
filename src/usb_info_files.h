@@ -4,15 +4,15 @@
 #include <FS.h>
 
 namespace UsbInfoFiles {
-void writeHowtoIni(File &file);
+void writeHowtoText(File &file);
 void writeWebsiteShortcut(File &file);
-void writeSettingsIni(File &file,
-					  float estimatedHeightM,
-					  float estimatedSpeedMps,
-					  float heightMarginM,
-					  float speedMarginMps,
-					  float launchThresholdG);
-void writeDebugIni(File &file,
+void writeSettingsSection(File &file,
+					   float estimatedHeightM,
+					   float estimatedSpeedMps,
+					   float heightMarginM,
+					   float speedMarginMps,
+					   float launchThresholdG);
+void writeDebugSection(File &file,
 				  const char *faultReason,
 				  bool coreTickOk,
 				  bool heapOk,

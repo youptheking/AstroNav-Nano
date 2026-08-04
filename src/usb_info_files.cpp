@@ -2,14 +2,14 @@
 
 namespace UsbInfoFiles {
 
-void writeHowtoIni(File &file) {
+void writeHowtoText(File &file) {
   file.println("AstroNav Nano USB Guide");
   file.println("Author: YoupSpace");
   file.println();
   file.println("What is on the drive:");
-  file.println("- HOWTO.INI: user guide");
-  file.println("- SETTINGS.INI: values you can edit and save");
-  file.println("- PROFILE.INI: read-only copy of the device profile stored in flash");
+  file.println("- Howto.txt: this guide");
+  file.println("- Settings.ini: one combined INI file with settings, profile, and debug sections");
+  file.println("- Website.url: clickable website shortcut");
   file.println();
   file.println("How to leave USB mode:");
   file.println("1. Preferred: use Safely Remove Hardware / Eject in Windows.");
@@ -28,11 +28,17 @@ void writeHowtoIni(File &file) {
   file.println("- LAUNCH_THRESHOLD_G: acceleration needed before launch is confirmed.");
   file.println("  Lower values trigger earlier, higher values require a harder launch.");
   file.println();
-  file.println("Extra files on the drive:");
-  file.println("- PROFILE.INI: flash-backed device profile copy");
-  file.println("- WEBSITE.URL: clickable website shortcut");
+  file.println("How to edit Settings.ini:");
+  file.println("1. Open Settings.ini in a text editor.");
+  file.println("2. Change only the key=value lines you understand.");
+  file.println("3. Save the file, then safely eject the drive.");
+  file.println("4. The board reloads the settings on the next USB session or reboot.");
   file.println();
-  file.println("PROFILE.INI is regenerated from flash-backed data and is only for viewing.");
+  file.println("Settings.ini sections:");
+  file.println("- [files]: canonical file names and log locations.");
+  file.println("- [settings]: editable flight tuning values.");
+  file.println("- [profile]: device identity and stored flight history.");
+  file.println("- [debug]: live health snapshot for the PC software.");
 }
 
 void writeWebsiteShortcut(File &file) {
@@ -41,13 +47,13 @@ void writeWebsiteShortcut(File &file) {
   file.println("IconIndex=0");
 }
 
-void writeSettingsIni(File &file,
-                      float estimatedHeightM,
-                      float estimatedSpeedMps,
-                      float heightMarginM,
-                      float speedMarginMps,
-                      float launchThresholdG) {
-  file.println("[flight]");
+void writeSettingsSection(File &file,
+             float estimatedHeightM,
+             float estimatedSpeedMps,
+             float heightMarginM,
+             float speedMarginMps,
+             float launchThresholdG) {
+  file.println("[settings]");
   file.println("; AstroNav Nano flight settings");
   file.println("; Edit the values below, then save the file.");
   file.println("; This file uses INI-style key/value pairs.");
@@ -58,25 +64,25 @@ void writeSettingsIni(File &file,
   file.printf("LAUNCH_THRESHOLD_G=%.2f\n", launchThresholdG);
 }
 
-void writeDebugIni(File &file,
-                   const char *faultReason,
-                   bool coreTickOk,
-                   bool heapOk,
-                   bool spiOk,
-                   bool imuWhoAmIOk,
-                   bool imuConfigOk,
-                   bool imuStreamOk,
-                   bool baroOk,
-                   bool flashFsOk,
-                   bool usbStorageOk,
-                   bool vinOk,
-                   bool warning,
-                   bool critical,
-                   float vinVoltage,
-                   uint8_t healthBits,
-                   const char *runtimeMode,
-                   const char *state,
-                   const char *powerMode) {
+void writeDebugSection(File &file,
+           const char *faultReason,
+           bool coreTickOk,
+           bool heapOk,
+           bool spiOk,
+           bool imuWhoAmIOk,
+           bool imuConfigOk,
+           bool imuStreamOk,
+           bool baroOk,
+           bool flashFsOk,
+           bool usbStorageOk,
+           bool vinOk,
+           bool warning,
+           bool critical,
+           float vinVoltage,
+           uint8_t healthBits,
+           const char *runtimeMode,
+           const char *state,
+           const char *powerMode) {
   file.println("[debug]");
   file.printf("FAULT_REASON=%s\n", faultReason && faultReason[0] ? faultReason : "none");
   file.printf("RUNTIME_MODE=%s\n", runtimeMode ? runtimeMode : "unknown");

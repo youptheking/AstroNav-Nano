@@ -52,6 +52,19 @@ static constexpr uint32_t MAX_FLIGHT_TIME_MS = 45000;
 static constexpr uint16_t FLIGHT_LOG_CAPACITY = 2048;
 static constexpr uint32_t PROFILE_MAGIC = 0x50455246;   // "FRFP"
 static constexpr uint32_t PROFILE_VERSION = 1;
+static constexpr const char *DEVICE_INFO_FILE = "/Settings.ini";
+static constexpr const char *HOWTO_FILE = "/Howto.txt";
+static constexpr const char *WEBSITE_FILE = "/Website.url";
+static constexpr const char *LEGACY_SETTINGS_FILE = "/SETTINGS.INI";
+static constexpr const char *LEGACY_PROFILE_FILE = "/PROFILE.INI";
+static constexpr const char *LEGACY_DEBUG_FILE = "/DEBUG.INI";
+static constexpr const char *LEGACY_HOWTO_FILE = "/HOWTO.INI";
+static constexpr const char *LEGACY_HOWTO_TEXT_FILE = "/HOWTO.TXT";
+static constexpr const char *LEGACY_WEBSITE_FILE = "/WEBSITE.URL";
+static constexpr const char *SECTION_FILES = "files";
+static constexpr const char *SECTION_SETTINGS = "settings";
+static constexpr const char *SECTION_PROFILE = "profile";
+static constexpr const char *SECTION_DEBUG = "debug";
 
 enum class PowerMode {
   Unknown,
@@ -229,8 +242,6 @@ bool shouldExitUsbModeFromUsbFiles();
 bool loadFlightSettings();
 bool loadOrCreateDeviceProfile();
 void persistDeviceProfile();
-void writeProfileIniFile();
-void writeDebugFile(const char *faultReason);
 void buildFaultReason(char *buffer, size_t bufferSize);
 uint8_t healthBits();
 bool systemHealthy();
@@ -415,13 +426,46 @@ void writeProfileFieldLine(File &file, const char *key, const char *value) {
   file.printf("%s=%s\n", key, value ? value : "");
 }
 
+bool parseIniSectionHeader(const char *line, char *sectionBuffer, size_t sectionBufferSize) {
+  if (!line || line[0] != '[') {
+    return false;
+  }
+
+  const char *sectionStart = line + 1;
+  const char *sectionEnd = strchr(sectionStart, ']');
+  if (!sectionEnd || sectionEnd <= sectionStart) {
+    return false;
+  }
+
+  size_t length = static_cast<size_t>(sectionEnd - sectionStart);
+  if (length >= sectionBufferSize) {
+    length = sectionBufferSize - 1;
+  }
+
+  for (size_t i = 0; i < length; i++) {
+    sectionBuffer[i] = static_cast<char>(tolower(static_cast<unsigned char>(sectionStart[i])));
+  }
+  sectionBuffer[length] = '\0';
+  return true;
+}
+
 bool loadFlightSettings() {
-  if (!storageReady || !FatFS.exists("/SETTINGS.INI")) {
+  const char *sourcePath = nullptr;
+  bool legacyFormat = false;
+
+  if (storageReady && FatFS.exists(DEVICE_INFO_FILE)) {
+    sourcePath = DEVICE_INFO_FILE;
+  } else if (storageReady && FatFS.exists(LEGACY_SETTINGS_FILE)) {
+    sourcePath = LEGACY_SETTINGS_FILE;
+    legacyFormat = true;
+  }
+
+  if (!sourcePath) {
     makeDefaultFlightSettings();
     return false;
   }
 
-  File settingsFile = FatFS.open("/SETTINGS.INI", "r");
+  File settingsFile = FatFS.open(sourcePath, "r");
   if (!settingsFile) {
     makeDefaultFlightSettings();
     return false;
@@ -429,6 +473,7 @@ bool loadFlightSettings() {
 
   makeDefaultFlightSettings();
   bool anyValue = false;
+  char currentSection[32] = {0};
   char line[128];
 
   while (settingsFile.available()) {
@@ -436,6 +481,13 @@ bool loadFlightSettings() {
     line[length] = '\0';
 
     if (line[0] == '#' || line[0] == ';' || line[0] == '[' || line[0] == '\0') {
+      if (line[0] == '[') {
+        parseIniSectionHeader(line, currentSection, sizeof(currentSection));
+      }
+      continue;
+    }
+
+    if (!legacyFormat && strcmp(currentSection, SECTION_SETTINGS) != 0) {
       continue;
     }
 
@@ -460,31 +512,15 @@ bool loadFlightSettings() {
 
   settingsFile.close();
   applyFlightSettings();
-  if (!anyValue) {
-    saveFlightSettings();
-  }
   return true;
 }
 
 void saveFlightSettings() {
-  if (!storageReady) {
+  if (!storageReady || deviceProfile.magic != PROFILE_MAGIC || deviceProfile.version != PROFILE_VERSION) {
     return;
   }
 
-  File settingsFile = FatFS.open("/SETTINGS.INI", "w");
-  if (!settingsFile) {
-    boardHealth.warning = true;
-    return;
-  }
-
-  UsbInfoFiles::writeSettingsIni(settingsFile,
-                                 flightSettings.estimatedHeightM,
-                                 flightSettings.estimatedSpeedMps,
-                                 flightSettings.heightMarginM,
-                                 flightSettings.speedMarginMps,
-                                 flightSettings.launchThresholdG);
-  settingsFile.flush();
-  settingsFile.close();
+  persistDeviceProfile();
 }
 
 void makeDefaultDeviceProfile() {
@@ -501,13 +537,23 @@ void updateDeviceProfileChecksum() {
 }
 
 bool loadOrCreateDeviceProfile() {
-  if (!storageReady || !FatFS.exists("/PROFILE.INI")) {
+  const char *sourcePath = nullptr;
+  bool legacyFormat = false;
+
+  if (storageReady && FatFS.exists(DEVICE_INFO_FILE)) {
+    sourcePath = DEVICE_INFO_FILE;
+  } else if (storageReady && FatFS.exists(LEGACY_PROFILE_FILE)) {
+    sourcePath = LEGACY_PROFILE_FILE;
+    legacyFormat = true;
+  }
+
+  if (!sourcePath) {
     makeDefaultDeviceProfile();
     updateDeviceProfileChecksum();
     return false;
   }
 
-  File profileFile = FatFS.open("/PROFILE.INI", "r");
+  File profileFile = FatFS.open(sourcePath, "r");
   if (!profileFile) {
     makeDefaultDeviceProfile();
     updateDeviceProfileChecksum();
@@ -518,6 +564,7 @@ bool loadOrCreateDeviceProfile() {
   bool anyValue = false;
   bool checksumPresent = false;
   uint32_t expectedChecksum = 0;
+  char currentSection[32] = {0};
   char line[160];
 
   while (profileFile.available()) {
@@ -525,6 +572,13 @@ bool loadOrCreateDeviceProfile() {
     line[length] = '\0';
 
     if (line[0] == '#' || line[0] == ';' || line[0] == '[' || line[0] == '\0') {
+      if (line[0] == '[') {
+        parseIniSectionHeader(line, currentSection, sizeof(currentSection));
+      }
+      continue;
+    }
+
+    if (!legacyFormat && strcmp(currentSection, SECTION_PROFILE) != 0) {
       continue;
     }
 
@@ -593,87 +647,61 @@ void persistDeviceProfile() {
   }
 
   updateDeviceProfileChecksum();
-  File profileFile = FatFS.open("/PROFILE.INI", "w");
-  if (!profileFile) {
+  File infoFile = FatFS.open(DEVICE_INFO_FILE, "w");
+  if (!infoFile) {
     boardHealth.warning = true;
     return;
   }
 
-  profileFile.println("[profile]");
-  writeProfileFieldLine(profileFile, "MAGIC", "50455246");
-  profileFile.printf("VERSION=%lu\n", static_cast<unsigned long>(deviceProfile.version));
-  writeProfileFieldLine(profileFile, "SERIAL_NUMBER", deviceProfile.serialNumber);
-  writeProfileFieldLine(profileFile, "FLASH_STAMP", deviceProfile.flashStamp);
-  profileFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
-  profileFile.printf("LOG_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
-  profileFile.printf("MAX_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.maxFlightAltitudeM);
-  profileFile.printf("MAX_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.maxFlightSpeedMps);
-  profileFile.printf("LAST_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.lastFlightAltitudeM);
-  profileFile.printf("LAST_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.lastFlightSpeedMps);
-  profileFile.printf("CHECKSUM=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
-  profileFile.flush();
-  profileFile.close();
-}
-
-void writeProfileIniFile() {
-  if (!storageReady) {
-    return;
-  }
-
-  File profileFile = FatFS.open("/PROFILE.INI", "w");
-  if (!profileFile) {
-    boardHealth.warning = true;
-    return;
-  }
-
-  profileFile.println("[profile]");
-  writeProfileFieldLine(profileFile, "MAGIC", "50455246");
-  profileFile.printf("VERSION=%lu\n", static_cast<unsigned long>(deviceProfile.version));
-  writeProfileFieldLine(profileFile, "SERIAL_NUMBER", deviceProfile.serialNumber);
-  writeProfileFieldLine(profileFile, "FLASH_STAMP", deviceProfile.flashStamp);
-  profileFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
-  profileFile.printf("LOG_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
-  profileFile.printf("MAX_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.maxFlightAltitudeM);
-  profileFile.printf("MAX_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.maxFlightSpeedMps);
-  profileFile.printf("LAST_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.lastFlightAltitudeM);
-  profileFile.printf("LAST_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.lastFlightSpeedMps);
-  profileFile.printf("CHECKSUM=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
-  profileFile.flush();
-  profileFile.close();
-}
-
-void writeDebugFile(const char *faultReason) {
-  if (!storageReady) {
-    return;
-  }
-
-  File debugFile = FatFS.open("/DEBUG.INI", "w");
-  if (!debugFile) {
-    boardHealth.warning = true;
-    return;
-  }
-
-  UsbInfoFiles::writeDebugIni(debugFile,
-                              faultReason,
-                              boardHealth.coreTickOk,
-                              boardHealth.heapOk,
-                              boardHealth.spiOk,
-                              boardHealth.imuWhoAmIOk,
-                              boardHealth.imuConfigOk,
-                              boardHealth.imuStreamOk,
-                              boardHealth.baroOk,
-                              boardHealth.flashFsOk,
-                              boardHealth.usbStorageOk,
-                              boardHealth.vinOk,
-                              boardHealth.warning,
-                              boardHealth.critical,
-                              currentVinVoltage,
-                              healthBits(),
-                              runtimeModeText(),
-                              stateText(flightState),
-                              powerModeText(powerMode));
-  debugFile.flush();
-  debugFile.close();
+  infoFile.println("; AstroNav Nano combined device settings");
+  infoFile.println("[files]");
+  infoFile.println("SETTINGS_FILE=Settings.ini");
+  infoFile.println("HOWTO_FILE=Howto.txt");
+  infoFile.println("WEBSITE_FILE=Website.url");
+  infoFile.println("LOG_DIRECTORY=/logs");
+  infoFile.println("LOG_PATTERN=Flight_*.csv");
+  infoFile.println();
+  UsbInfoFiles::writeSettingsSection(infoFile,
+                                    flightSettings.estimatedHeightM,
+                                    flightSettings.estimatedSpeedMps,
+                                    flightSettings.heightMarginM,
+                                    flightSettings.speedMarginMps,
+                                    flightSettings.launchThresholdG);
+  infoFile.println();
+  infoFile.println("[profile]");
+  writeProfileFieldLine(infoFile, "MAGIC", "50455246");
+  infoFile.printf("VERSION=%lu\n", static_cast<unsigned long>(deviceProfile.version));
+  writeProfileFieldLine(infoFile, "SERIAL_NUMBER", deviceProfile.serialNumber);
+  writeProfileFieldLine(infoFile, "FLASH_STAMP", deviceProfile.flashStamp);
+  infoFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
+  infoFile.printf("LOG_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
+  infoFile.printf("MAX_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.maxFlightAltitudeM);
+  infoFile.printf("MAX_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.maxFlightSpeedMps);
+  infoFile.printf("LAST_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.lastFlightAltitudeM);
+  infoFile.printf("LAST_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.lastFlightSpeedMps);
+  infoFile.printf("CHECKSUM=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
+  infoFile.println();
+  UsbInfoFiles::writeDebugSection(infoFile,
+                                  lastFaultReason,
+                                  boardHealth.coreTickOk,
+                                  boardHealth.heapOk,
+                                  boardHealth.spiOk,
+                                  boardHealth.imuWhoAmIOk,
+                                  boardHealth.imuConfigOk,
+                                  boardHealth.imuStreamOk,
+                                  boardHealth.baroOk,
+                                  boardHealth.flashFsOk,
+                                  boardHealth.usbStorageOk,
+                                  boardHealth.vinOk,
+                                  boardHealth.warning,
+                                  boardHealth.critical,
+                                  currentVinVoltage,
+                                  healthBits(),
+                                  runtimeModeText(),
+                                  stateText(flightState),
+                                  powerModeText(powerMode));
+  infoFile.flush();
+  infoFile.close();
 }
 
 float clampFloat(float value, float minimum, float maximum) {
@@ -730,7 +758,7 @@ uint8_t healthBits() {
 }
 
 void startMissionLog() {
-  snprintf(missionLogPath, sizeof(missionLogPath), "/logs/flight_%08lu.csv", static_cast<unsigned long>(bootMs));
+  snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(bootMs));
   missionLogCount = 0;
   missionStarted = true;
   missionLogFlushed = false;
@@ -781,9 +809,14 @@ void cleanupLegacyUsbFiles() {
   FatFS.remove("/USB_MODE_DEMO");
   FatFS.remove("/USB_MODE_DEMO.TXT");
   FatFS.remove("/USB_MODE_DEMO.INI");
-  FatFS.remove("/HOWTO.TXT");
+  FatFS.remove(LEGACY_HOWTO_FILE);
+  FatFS.remove(LEGACY_HOWTO_TEXT_FILE);
   FatFS.remove("/PERSONAL.TXT");
   FatFS.remove("/PROFILE.BIN");
+  FatFS.remove(LEGACY_SETTINGS_FILE);
+  FatFS.remove(LEGACY_PROFILE_FILE);
+  FatFS.remove(LEGACY_DEBUG_FILE);
+  FatFS.remove(LEGACY_WEBSITE_FILE);
   FatFS.remove("/SETTINGS.TXT");
   FatFS.remove("/WEBSITE.TXT");
 }
@@ -795,17 +828,17 @@ void ensureUsbInfoFiles() {
 
   cleanupLegacyUsbFiles();
 
-  File howToFile = FatFS.open("/HOWTO.INI", "w");
+  File howToFile = FatFS.open(HOWTO_FILE, "w");
   if (!howToFile) {
     boardHealth.warning = true;
     return;
   }
 
-  UsbInfoFiles::writeHowtoIni(howToFile);
+  UsbInfoFiles::writeHowtoText(howToFile);
   howToFile.flush();
   howToFile.close();
 
-  File websiteFile = FatFS.open("/WEBSITE.URL", "w");
+  File websiteFile = FatFS.open(WEBSITE_FILE, "w");
   if (!websiteFile) {
     boardHealth.warning = true;
     return;
@@ -815,14 +848,7 @@ void ensureUsbInfoFiles() {
   websiteFile.flush();
   websiteFile.close();
 
-  if (!FatFS.exists("/SETTINGS.INI")) {
-    saveFlightSettings();
-  }
-
-  writeProfileIniFile();
-
-  buildFaultReason(lastFaultReason, sizeof(lastFaultReason));
-  writeDebugFile(lastFaultReason);
+  persistDeviceProfile();
 }
 
 void onUsbStorageUnplug(uint32_t cbData) {
@@ -1234,11 +1260,7 @@ void setup() {
   }
 
   if (storageReady) {
-    if (powerMode == PowerMode::USB && !usbFlightOverride) {
-      writeProfileIniFile();
-    } else {
-      persistDeviceProfile();
-    }
+    persistDeviceProfile();
   }
 
   updateStatusLed();

@@ -1,0 +1,111 @@
+AstroNav Nano PC USB Interface Specification
+
+Purpose
+- The device exposes a USB mass-storage view for the PC application.
+- The PC application should read the combined settings file, the how-to text file, the website shortcut, and the flight logs.
+- File names use mixed case, not all caps.
+
+USB mode behavior
+- USB storage is enabled when the board is powered from USB and has not been forced back into flight mode.
+- The device can leave USB mode when the user safely ejects the drive or sends EXITUSB over the serial port.
+- The PC software should expect the drive to disconnect after exit from USB mode.
+
+Root files
+- Settings.ini
+- Howto.txt
+- Website.url
+- logs/
+
+Settings.ini layout
+- This is the single combined INI file for the device.
+- The PC software should parse it as plain INI text with section headers.
+- Sections:
+  - [files] exposes canonical file names and log locations.
+  - [settings] contains user-editable flight tuning values.
+  - [profile] contains stored device identity and flight summary data.
+  - [debug] contains live health and runtime state.
+
+Settings.ini keys
+- [files]
+  - SETTINGS_FILE = Settings.ini
+  - HOWTO_FILE = Howto.txt
+  - WEBSITE_FILE = Website.url
+  - LOG_DIRECTORY = /logs
+  - LOG_PATTERN = Flight_*.csv
+- [settings]
+  - ESTIMATED_HEIGHT_M
+  - HEIGHT_MARGIN_M
+  - ESTIMATED_SPEED_MPS
+  - SPEED_MARGIN_MPS
+  - LAUNCH_THRESHOLD_G
+- [profile]
+  - MAGIC
+  - VERSION
+  - SERIAL_NUMBER
+  - FLASH_STAMP
+  - FLIGHT_COUNT
+  - LOG_COUNT
+  - MAX_FLIGHT_ALTITUDE_M
+  - MAX_FLIGHT_SPEED_MPS
+  - LAST_FLIGHT_ALTITUDE_M
+  - LAST_FLIGHT_SPEED_MPS
+  - CHECKSUM
+- [debug]
+  - FAULT_REASON
+  - RUNTIME_MODE
+  - STATE
+  - POWER_MODE
+  - VIN_VOLTAGE
+  - HEALTH_BITS
+  - HEALTHY
+  - CORE_TICK_OK
+  - HEAP_OK
+  - SPI_OK
+  - IMU_WHOAMI_OK
+  - IMU_CONFIG_OK
+  - IMU_STREAM_OK
+  - BARO_OK
+  - FLASH_FS_OK
+  - USB_STORAGE_OK
+  - VIN_OK
+  - WARNING
+  - CRITICAL
+
+Howto.txt behavior
+- Human-readable instructions for operators and the PC application team.
+- Describes how to edit Settings.ini and how to exit USB mode safely.
+- Should be treated as read-only by the PC application.
+
+Website.url behavior
+- Standard Windows InternetShortcut file.
+- Use it as a shortcut target in the UI.
+
+Logs
+- Log files are stored under /logs.
+- Each log is CSV and named like Flight_<timestamp>.csv.
+- The first row is a header.
+- Each row contains:
+  - counter
+  - ms
+  - state
+  - power
+  - ax_g
+  - ay_g
+  - az_g
+  - gx_dps
+  - gy_dps
+  - gz_dps
+  - temp_c
+  - pressure_hpa
+  - altitude_m
+  - vertical_velocity_mps
+  - roll_deg
+  - pitch_deg
+  - health_bits
+
+PC software integration rules
+- Read Settings.ini first to discover the current file names and log directory.
+- Treat [settings] as editable and [profile] and [debug] as read-only.
+- Refresh the UI when Settings.ini or any log CSV changes.
+- Do not assume uppercase file names.
+- Prefer preserving unknown keys and sections when rewriting Settings.ini.

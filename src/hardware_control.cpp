@@ -43,7 +43,6 @@ extern void updateStatusLed();
 extern void enterFlightModeFromUsb();
 extern void onUsbStorageUnplug(uint32_t cbData);
 extern void ensureUsbInfoFiles();
-extern void writeProfileIniFile();
 extern void persistDeviceProfile();
 extern void flushMissionLogToFlash();
 extern void startMissionLog();
