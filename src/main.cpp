@@ -63,6 +63,7 @@ static constexpr const char *LEGACY_DEBUG_FILE = "/DEBUG.INI";
 static constexpr const char *LEGACY_HOWTO_FILE = "/HOWTO.INI";
 static constexpr const char *LEGACY_HOWTO_TEXT_FILE = "/HOWTO.TXT";
 static constexpr const char *LEGACY_WEBSITE_FILE = "/WEBSITE.URL";
+static constexpr const char *LEGACY_MOREHELP_FILE = "/MoreHelp.url";
 static constexpr const char *LEGACY_AUTORUN_FILE = "/AUTORUN.INF";
 static constexpr const char *SECTION_FILES = "files";
 static constexpr const char *SECTION_SETTINGS = "settings";
@@ -877,6 +878,7 @@ void cleanupLegacyUsbFiles() {
   FatFS.remove(LEGACY_PROFILE_FILE);
   FatFS.remove(LEGACY_DEBUG_FILE);
   FatFS.remove(LEGACY_WEBSITE_FILE);
+  FatFS.remove(LEGACY_MOREHELP_FILE);
   FatFS.remove(LEGACY_AUTORUN_FILE);
   FatFS.remove("/SETTINGS.TXT");
   FatFS.remove("/WEBSITE.TXT");
