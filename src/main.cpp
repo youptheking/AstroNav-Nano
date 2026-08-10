@@ -94,6 +94,7 @@ enum class FlightState {
 
 enum class LedProfile {
   Boot,
+  Calibrating,
   Idle,
   IdleUsb,
   Idle1S,
@@ -869,6 +870,8 @@ void cleanupLegacyUsbFiles() {
     return;
   }
 
+  FatFS.remove("/SETTINGS.BIN");
+  FatFS.remove("/settings.bin");
   FatFS.remove("/USB_MODE_DEMO");
   FatFS.remove("/USB_MODE_DEMO.TXT");
   FatFS.remove("/USB_MODE_DEMO.INI");
@@ -1067,26 +1070,29 @@ void setLedProfile(LedProfile profile) {
     case LedProfile::Boot:
       scaleAndSet(255, 255, 255);
       break;
+    case LedProfile::Calibrating:
+      scaleAndSet(0, 255, 255);
+      break;
     case LedProfile::Idle:
-      scaleAndSet(255, 128, 0);
+      scaleAndSet(0, 255, 96);
       break;
     case LedProfile::IdleUsb:
       scaleAndSet(0, 128, 255);
       break;
     case LedProfile::Idle1S:
-      scaleAndSet(0, 255, 96);
+      scaleAndSet(255, 224, 0);
       break;
     case LedProfile::Idle2S:
-      scaleAndSet(255, 144, 0);
+      scaleAndSet(255, 128, 0);
       break;
     case LedProfile::Coast:
-      scaleAndSet(180, 0, 255);
+      scaleAndSet(176, 0, 255);
       break;
     case LedProfile::Warning:
-      scaleAndSet(255, 0, 160);
+      scaleAndSet(255, 0, 192);
       break;
     case LedProfile::Landed:
-      scaleAndSet(0, 220, 220);
+      scaleAndSet(0, 220, 160);
       break;
     case LedProfile::Fault:
     default:
@@ -1111,7 +1117,7 @@ void updateStatusLed() {
       setLedProfile(LedProfile::Boot);
       break;
     case FlightState::Calibrating:
-      setLedProfile(LedProfile::Boot);
+      setLedProfile(LedProfile::Calibrating);
       break;
     case FlightState::Idle:
       setLedProfile(LedProfile::Idle);
