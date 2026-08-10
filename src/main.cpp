@@ -1001,6 +1001,15 @@ bool shouldExitUsbModeFromUsbFiles() {
 void enterFlightModeFromUsb() {
   usbFlightOverride = true;
   usbExitRequested = false;
+
+  if (storageReady) {
+    loadFlightSettings();
+    if (settingsNeedPersist) {
+      persistDeviceProfile();
+      settingsNeedPersist = false;
+    }
+  }
+
   if (usbDriveReady) {
     FatFSUSB.unplug();
     usbDriveReady = false;
