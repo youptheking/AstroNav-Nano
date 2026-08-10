@@ -11,6 +11,8 @@
 #include "hardware_control.h"
 #include "usb_info_files.h"
 
+extern "C" bool tud_disconnect(void);
+
 /*
  * AstroNav flight firmware for RP2350
  * - Startup health check with LED status
@@ -959,6 +961,8 @@ void enterFlightModeFromUsb() {
     usbDriveReady = false;
     boardHealth.usbStorageOk = false;
   }
+
+  tud_disconnect();
 
   setFlightState(FlightState::Calibrating);
   if (calibratePadOrientation()) {
