@@ -11,6 +11,37 @@
 #include "hardware_control.h"
 #include "usb_info_files.h"
 
+#ifndef AUTO_VERSION
+#define AUTO_VERSION "dev"
+#endif
+
+class Assets {
+ public:
+  const char *Firmware_Version = AUTO_VERSION;
+  uint16_t TotalFlights = 0;
+  String Device_Key = "0";
+};
+
+Assets assets;
+
+namespace OldCodeTemporary {
+String generateRandomKey(uint8_t len) {
+  uint32_t seed = micros() ^ (millis() << 16) ^ static_cast<uint32_t>(analogRead(PIN_VIN_SENSE));
+  randomSeed(seed);
+
+  const char chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  String key = "";
+  for (uint8_t i = 0; i < len; i++) {
+    key += chars[random(0, sizeof(chars) - 1)];
+  }
+  return key;
+}
+}
+
+bool isPlaceholderSerial(const char *serialNumber) {
+  return !serialNumber || serialNumber[0] == '\0' || strcmp(serialNumber, "AN-0001") == 0;
+}
+
 extern "C" bool tud_disconnect(void);
 
 /*
@@ -135,7 +166,7 @@ struct FlightSettings {
 struct DeviceProfile {
   uint32_t magic = PROFILE_MAGIC;
   uint32_t version = PROFILE_VERSION;
-  char serialNumber[20] = "AN-0001";
+  char serialNumber[20] = "";
   char flashStamp[24] = "";
   uint32_t flightCount = 0;
   uint32_t logCount = 0;
@@ -253,6 +284,7 @@ bool shouldExitUsbModeFromUsbFiles();
 bool loadFlightSettings();
 bool loadOrCreateDeviceProfile();
 void persistDeviceProfile();
+void syncAssetsFromDeviceProfile();
 void buildFaultReason(char *buffer, size_t bufferSize);
 uint8_t healthBits();
 bool systemHealthy();
@@ -625,13 +657,30 @@ void makeDefaultDeviceProfile() {
   memset(&deviceProfile, 0, sizeof(deviceProfile));
   deviceProfile.magic = PROFILE_MAGIC;
   deviceProfile.version = PROFILE_VERSION;
-  snprintf(deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber), "AN-0001");
+  deviceProfile.serialNumber[0] = '\0';
+  assets.Device_Key = "0";
   buildFlashStamp(deviceProfile.flashStamp, sizeof(deviceProfile.flashStamp));
+  assets.TotalFlights = 0;
+}
+
+void ensureDeviceSerial() {
+  if (!isPlaceholderSerial(deviceProfile.serialNumber)) {
+    assets.Device_Key = deviceProfile.serialNumber;
+    return;
+  }
+
+  assets.Device_Key = String("AN-") + OldCodeTemporary::generateRandomKey(8);
+  snprintf(deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber), "%s", assets.Device_Key.c_str());
 }
 
 void updateDeviceProfileChecksum() {
   deviceProfile.checksum = 0;
   deviceProfile.checksum = checksumBytes(reinterpret_cast<const uint8_t *>(&deviceProfile), sizeof(deviceProfile) - sizeof(deviceProfile.checksum));
+}
+
+void syncAssetsFromDeviceProfile() {
+  assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
+  assets.Device_Key = deviceProfile.serialNumber;
 }
 
 bool loadOrCreateDeviceProfile() {
@@ -684,13 +733,13 @@ bool loadOrCreateDeviceProfile() {
     if (readProfileLine(line, "MAGIC", value, sizeof(value))) {
       deviceProfile.magic = static_cast<uint32_t>(strtoul(value, nullptr, 16));
       anyValue = true;
-    } else if (readProfileLine(line, "VERSION", value, sizeof(value))) {
-      deviceProfile.version = static_cast<uint32_t>(strtoul(value, nullptr, 10));
-      anyValue = true;
     } else if (readProfileLine(line, "SERIAL_NUMBER", value, sizeof(value))) {
       strncpy(deviceProfile.serialNumber, value, sizeof(deviceProfile.serialNumber) - 1);
       deviceProfile.serialNumber[sizeof(deviceProfile.serialNumber) - 1] = '\0';
       anyValue = true;
+      if (!isPlaceholderSerial(deviceProfile.serialNumber)) {
+        assets.Device_Key = deviceProfile.serialNumber;
+      }
     } else if (readProfileLine(line, "FLASH_STAMP", value, sizeof(value))) {
       strncpy(deviceProfile.flashStamp, value, sizeof(deviceProfile.flashStamp) - 1);
       deviceProfile.flashStamp[sizeof(deviceProfile.flashStamp) - 1] = '\0';
@@ -698,6 +747,7 @@ bool loadOrCreateDeviceProfile() {
     } else if (readProfileLine(line, "FLIGHT_COUNT", value, sizeof(value))) {
       deviceProfile.flightCount = static_cast<uint32_t>(strtoul(value, nullptr, 10));
       anyValue = true;
+      assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
     } else if (readProfileLine(line, "LOG_COUNT", value, sizeof(value))) {
       deviceProfile.logCount = static_cast<uint32_t>(strtoul(value, nullptr, 10));
       anyValue = true;
@@ -736,6 +786,8 @@ bool loadOrCreateDeviceProfile() {
   }
 
   deviceProfile.checksum = expectedChecksum;
+  ensureDeviceSerial();
+  syncAssetsFromDeviceProfile();
   return true;
 }
 
@@ -743,6 +795,8 @@ void persistDeviceProfile() {
   if (!storageReady) {
     return;
   }
+
+  ensureDeviceSerial();
 
   updateDeviceProfileChecksum();
   File infoFile = FatFS.open(DEVICE_INFO_FILE, "w");
@@ -768,7 +822,7 @@ void persistDeviceProfile() {
   infoFile.println();
   infoFile.println("[profile]");
   writeProfileFieldLine(infoFile, "MAGIC", "50455246");
-  infoFile.printf("VERSION=%lu\n", static_cast<unsigned long>(deviceProfile.version));
+  infoFile.printf("VERSION=%s\n", assets.Firmware_Version);
   writeProfileFieldLine(infoFile, "SERIAL_NUMBER", deviceProfile.serialNumber);
   writeProfileFieldLine(infoFile, "FLASH_STAMP", deviceProfile.flashStamp);
   infoFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
@@ -862,6 +916,7 @@ uint8_t healthBits() {
 void startMissionLog() {
   currentFlightNumber = deviceProfile.flightCount + 1;
   deviceProfile.flightCount = currentFlightNumber;
+  assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
   snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(currentFlightNumber));
   missionLogCount = 0;
   missionStarted = true;
@@ -1370,6 +1425,8 @@ void setup() {
     ensureLogsDirectory();
     loadFlightSettings();
     loadOrCreateDeviceProfile();
+    ensureDeviceSerial();
+    syncAssetsFromDeviceProfile();
     persistDeviceProfile();
     settingsNeedPersist = false;
   }
