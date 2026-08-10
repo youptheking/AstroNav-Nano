@@ -2,6 +2,13 @@
 
 namespace UsbInfoFiles {
 
+static void printFloatValue(File &file, const char *key, float value, uint8_t digits) {
+  file.print(key);
+  file.print('=');
+  file.print(value, digits);
+  file.println();
+}
+
 void writeHowtoText(File &file) {
   file.println("AstroNav Nano USB Guide");
   file.println("Author: YoupSpace");
@@ -65,11 +72,11 @@ void writeSettingsSection(File &file,
   file.println("; AstroNav Nano flight settings");
   file.println("; Edit the values below, then save the file.");
   file.println("; This file uses INI-style key/value pairs.");
-  file.printf("ESTIMATED_HEIGHT_M=%.1f\n", estimatedHeightM);
-  file.printf("HEIGHT_MARGIN_M=%.1f\n", heightMarginM);
-  file.printf("ESTIMATED_SPEED_MPS=%.1f\n", estimatedSpeedMps);
-  file.printf("SPEED_MARGIN_MPS=%.1f\n", speedMarginMps);
-  file.printf("LAUNCH_THRESHOLD_G=%.2f\n", launchThresholdG);
+  printFloatValue(file, "ESTIMATED_HEIGHT_M", estimatedHeightM, 1);
+  printFloatValue(file, "HEIGHT_MARGIN_M", heightMarginM, 1);
+  printFloatValue(file, "ESTIMATED_SPEED_MPS", estimatedSpeedMps, 1);
+  printFloatValue(file, "SPEED_MARGIN_MPS", speedMarginMps, 1);
+  printFloatValue(file, "LAUNCH_THRESHOLD_G", launchThresholdG, 2);
 }
 
 void writeDebugSection(File &file,
@@ -96,7 +103,7 @@ void writeDebugSection(File &file,
   file.printf("RUNTIME_MODE=%s\n", runtimeMode ? runtimeMode : "unknown");
   file.printf("STATE=%s\n", state ? state : "unknown");
   file.printf("POWER_MODE=%s\n", powerMode ? powerMode : "unknown");
-  file.printf("VIN_VOLTAGE=%.3f\n", vinVoltage);
+  printFloatValue(file, "VIN_VOLTAGE", vinVoltage, 3);
   file.printf("HEALTH_BITS=%u\n", healthBits);
   file.printf("HEALTHY=%s\n", (coreTickOk && heapOk && spiOk && imuWhoAmIOk && imuConfigOk && imuStreamOk && baroOk && !critical) ? "TRUE" : "FALSE");
   file.println();

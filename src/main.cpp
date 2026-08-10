@@ -159,6 +159,7 @@ bool storageReady = false;
 bool usbDriveReady = false;
 bool usbFlightOverride = false;
 bool usbExitRequested = false;
+bool settingsNeedPersist = false;
 bool missionLogFlushed = false;
 bool pyroLatched = false;
 bool missionStarted = false;
@@ -534,6 +535,12 @@ bool loadFlightSettings() {
 
   makeDefaultFlightSettings();
   bool anyValue = false;
+  bool settingsDirty = false;
+  bool estimatedHeightLoaded = false;
+  bool estimatedSpeedLoaded = false;
+  bool heightMarginLoaded = false;
+  bool speedMarginLoaded = false;
+  bool launchThresholdLoaded = false;
   char currentSection[32] = {0};
   char line[128];
 
@@ -554,30 +561,60 @@ bool loadFlightSettings() {
 
     char value[64];
     if (readSettingLine(line, "ESTIMATED_HEIGHT_M", value, sizeof(value))) {
-      flightSettings.estimatedHeightM = static_cast<float>(atof(value));
+      estimatedHeightLoaded = true;
+      if (value[0] != '\0') {
+        flightSettings.estimatedHeightM = static_cast<float>(strtof(value, nullptr));
+      } else {
+        settingsDirty = true;
+      }
       anyValue = true;
     } else if (readSettingLine(line, "ESTIMATED_SPEED_MPS", value, sizeof(value))) {
-      flightSettings.estimatedSpeedMps = static_cast<float>(atof(value));
+      estimatedSpeedLoaded = true;
+      if (value[0] != '\0') {
+        flightSettings.estimatedSpeedMps = static_cast<float>(strtof(value, nullptr));
+      } else {
+        settingsDirty = true;
+      }
       anyValue = true;
     } else if (readSettingLine(line, "HEIGHT_MARGIN_M", value, sizeof(value))) {
-      flightSettings.heightMarginM = static_cast<float>(atof(value));
+      heightMarginLoaded = true;
+      if (value[0] != '\0') {
+        flightSettings.heightMarginM = static_cast<float>(strtof(value, nullptr));
+      } else {
+        settingsDirty = true;
+      }
       anyValue = true;
     } else if (readSettingLine(line, "SPEED_MARGIN_MPS", value, sizeof(value))) {
-      flightSettings.speedMarginMps = static_cast<float>(atof(value));
+      speedMarginLoaded = true;
+      if (value[0] != '\0') {
+        flightSettings.speedMarginMps = static_cast<float>(strtof(value, nullptr));
+      } else {
+        settingsDirty = true;
+      }
       anyValue = true;
     } else if (readSettingLine(line, "LAUNCH_THRESHOLD_G", value, sizeof(value))) {
-      flightSettings.launchThresholdG = static_cast<float>(atof(value));
+      launchThresholdLoaded = true;
+      if (value[0] != '\0') {
+        flightSettings.launchThresholdG = static_cast<float>(strtof(value, nullptr));
+      } else {
+        settingsDirty = true;
+      }
       anyValue = true;
     }
   }
 
   settingsFile.close();
   applyFlightSettings();
+  if (!estimatedHeightLoaded || !estimatedSpeedLoaded || !heightMarginLoaded || !speedMarginLoaded || !launchThresholdLoaded) {
+    settingsDirty = true;
+  }
+
+  settingsNeedPersist = settingsDirty;
   return true;
 }
 
 void saveFlightSettings() {
-  if (!storageReady || deviceProfile.magic != PROFILE_MAGIC || deviceProfile.version != PROFILE_VERSION) {
+  if (!storageReady) {
     return;
   }
 
@@ -598,8 +635,8 @@ void updateDeviceProfileChecksum() {
 }
 
 bool loadOrCreateDeviceProfile() {
-  const char *sourcePath = nullptr;
   bool legacyFormat = false;
+  const char *sourcePath = nullptr;
 
   if (storageReady && FatFS.exists(DEVICE_INFO_FILE)) {
     sourcePath = DEVICE_INFO_FILE;
@@ -736,10 +773,14 @@ void persistDeviceProfile() {
   writeProfileFieldLine(infoFile, "FLASH_STAMP", deviceProfile.flashStamp);
   infoFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
   infoFile.printf("LOG_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
-  infoFile.printf("MAX_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.maxFlightAltitudeM);
-  infoFile.printf("MAX_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.maxFlightSpeedMps);
-  infoFile.printf("LAST_FLIGHT_ALTITUDE_M=%.1f\n", deviceProfile.lastFlightAltitudeM);
-  infoFile.printf("LAST_FLIGHT_SPEED_MPS=%.1f\n", deviceProfile.lastFlightSpeedMps);
+  infoFile.print("MAX_FLIGHT_ALTITUDE_M=");
+  infoFile.println(deviceProfile.maxFlightAltitudeM, 1);
+  infoFile.print("MAX_FLIGHT_SPEED_MPS=");
+  infoFile.println(deviceProfile.maxFlightSpeedMps, 1);
+  infoFile.print("LAST_FLIGHT_ALTITUDE_M=");
+  infoFile.println(deviceProfile.lastFlightAltitudeM, 1);
+  infoFile.print("LAST_FLIGHT_SPEED_MPS=");
+  infoFile.println(deviceProfile.lastFlightSpeedMps, 1);
   infoFile.printf("CHECKSUM=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
   infoFile.println();
   UsbInfoFiles::writeDebugSection(infoFile,
@@ -878,6 +919,7 @@ void cleanupLegacyUsbFiles() {
   FatFS.remove(LEGACY_HOWTO_FILE);
   FatFS.remove(LEGACY_HOWTO_TEXT_FILE);
   FatFS.remove("/PERSONAL.TXT");
+  FatFS.remove("/Profile.bin");
   FatFS.remove("/PROFILE.BIN");
   FatFS.remove(LEGACY_SETTINGS_FILE);
   FatFS.remove(LEGACY_PROFILE_FILE);
@@ -1319,6 +1361,8 @@ void setup() {
     ensureLogsDirectory();
     loadFlightSettings();
     loadOrCreateDeviceProfile();
+    persistDeviceProfile();
+    settingsNeedPersist = false;
   }
 
   if (powerMode == PowerMode::USB && storageReady && !usbFlightOverride) {
