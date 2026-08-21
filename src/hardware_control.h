@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 
+enum class FlightState;
+
 struct ImuSample {
   int16_t ax;
   int16_t ay;
@@ -85,6 +87,7 @@ bool readImuFrame(float &ax, float &ay, float &az, float &gx, float &gy, float &
 bool verifyImuStream();
 bool configureImu();
 bool calibratePadOrientation();
+bool setFlightState(enum FlightState nextState);
 void firePyro();
 void updatePyroOutput();
 void recordFaultAndSafeStop();

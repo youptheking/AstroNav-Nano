@@ -334,7 +334,7 @@ void firePyro() {
   pyroLatched = true;
   pyroPulseUntilMs = millis() + PYRO_PULSE_MS;
   digitalWrite(PIN_PYRO, HIGH);
-  flightState = FlightState::PyroFired;
+  setFlightState(FlightState::PyroFired);
 }
 
 void updatePyroOutput() {
@@ -344,7 +344,7 @@ void updatePyroOutput() {
 }
 
 void recordFaultAndSafeStop() {
-  flightState = FlightState::Fault;
+  setFlightState(FlightState::Fault);
   digitalWrite(PIN_PYRO, LOW);
 }
 
