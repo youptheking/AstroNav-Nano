@@ -162,6 +162,7 @@ struct FlightSettings {
   float heightMarginM = 20.0f;
   float speedMarginMps = 8.0f;
   float launchThresholdG = 1.35f;
+  bool firePyroAtApogee = true;
 };
 
 struct DeviceProfile {
@@ -441,6 +442,7 @@ void makeDefaultFlightSettings() {
   flightSettings.heightMarginM = 20.0f;
   flightSettings.speedMarginMps = 8.0f;
   flightSettings.launchThresholdG = 1.35f;
+  flightSettings.firePyroAtApogee = true;
   applyFlightSettings();
 }
 
@@ -577,6 +579,7 @@ bool loadFlightSettings() {
   bool heightMarginLoaded = false;
   bool speedMarginLoaded = false;
   bool launchThresholdLoaded = false;
+  bool firePyroAtApogeeLoaded = false;
   char currentSection[32] = {0};
   char line[128];
 
@@ -636,12 +639,20 @@ bool loadFlightSettings() {
         settingsDirty = true;
       }
       anyValue = true;
+    } else if (readSettingLine(line, "FIRE_PYRO_APOGEE", value, sizeof(value))) {
+      firePyroAtApogeeLoaded = true;
+      if (value[0] != '\0') {
+        flightSettings.firePyroAtApogee = parseBoolValue(value);
+      } else {
+        settingsDirty = true;
+      }
+      anyValue = true;
     }
   }
 
   settingsFile.close();
   applyFlightSettings();
-  if (!estimatedHeightLoaded || !estimatedSpeedLoaded || !heightMarginLoaded || !speedMarginLoaded || !launchThresholdLoaded) {
+  if (!estimatedHeightLoaded || !estimatedSpeedLoaded || !heightMarginLoaded || !speedMarginLoaded || !launchThresholdLoaded || !firePyroAtApogeeLoaded) {
     settingsDirty = true;
   }
 
@@ -822,7 +833,8 @@ void persistDeviceProfile() {
                                     flightSettings.estimatedSpeedMps,
                                     flightSettings.heightMarginM,
                                     flightSettings.speedMarginMps,
-                                    flightSettings.launchThresholdG);
+                                    flightSettings.launchThresholdG,
+                                    flightSettings.firePyroAtApogee);
   infoFile.println();
   infoFile.println("[profile]");
   writeProfileFieldLine(infoFile, "MAGIC", "50455246");
@@ -1376,8 +1388,12 @@ void updateFlightStateFromSamples() {
       apogeeConfirmCount = 0;
     }
 
-    if (apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
+    if (flightSettings.firePyroAtApogee && apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
       firePyro();
+      apogeeConfirmCount = 0;
+    }
+
+    if (!flightSettings.firePyroAtApogee && apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
       apogeeConfirmCount = 0;
     }
 

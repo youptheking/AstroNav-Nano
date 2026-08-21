@@ -174,8 +174,18 @@ The current USB settings remain intentionally small and practical:
 - ESTIMATED_SPEED_MPS
 - SPEED_MARGIN_MPS
 - LAUNCH_THRESHOLD_G
+- FIRE_PYRO_APOGEE
 
 These are the current user-editable parameters in the USB settings file. They are sufficient for the current product phase and leave space for later tuning extensions if needed.
+
+### FIRE_PYRO_APOGEE
+
+This is a boolean setting used to enable or disable pyro firing at apogee.
+
+- TRUE: apogee detection can fire the pyro output
+- FALSE: apogee conditions are still logged and detected, but no pyro pulse is fired at apogee
+
+This is useful for testing, safe commissioning, or future mission profiles where the apogee event should be detected without actuating the pyro channel.
 
 The values are kept in the same structure as the current firmware design and are edited over USB without requiring a serial command interface.
 

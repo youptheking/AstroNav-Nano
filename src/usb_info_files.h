@@ -12,7 +12,8 @@ void writeSettingsSection(File &file,
 					   float estimatedSpeedMps,
 					   float heightMarginM,
 					   float speedMarginMps,
-					   float launchThresholdG);
+						   float launchThresholdG,
+						   bool firePyroAtApogee);
 void writeDebugSection(File &file,
 				  const char *faultReason,
 				  bool coreTickOk,

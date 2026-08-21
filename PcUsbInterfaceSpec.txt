@@ -1,36 +1,36 @@
 AstroNav Nano PC USB Interface Specification
 
-Purpose
-- The device exposes a USB mass-storage view for the PC application.
-- The PC application should read the combined settings file, the how-to text file, the website shortcut, and the flight logs.
-- File names use mixed case, not all caps.
+Overview
+- The device exposes a USB mass-storage interface to a PC when it is powered from USB.
+- The PC should treat Settings.ini as the primary configuration file and the authoritative source for file names, log location, and live device state.
+- The current firmware contract is USB-first and intentionally keeps the user-editable tuning values in the combined Settings.ini file.
+- This document reflects the current firmware behavior and should be treated as the live interface contract for the PC software.
 
 USB mode behavior
-- USB storage is enabled when the board is powered from USB and has not been forced back into flight mode.
-- The device can leave USB mode when the user safely ejects the drive or sends EXITUSB over the serial port.
-- The PC software should expect the drive to disconnect after exit from USB mode.
-- The USB mass-storage device identification text is controlled by the current firmware stack, but the file names below are the contract the PC software should use.
-- The USB MSC inquiry text currently identifies as AstroNav / Nano Flight / 1.0.
-- The FAT volume label is written as AstroNav Nano when the filesystem accepts it, with shorter fallbacks if the label length is rejected.
-- The root also contains autorun.inf as a best-effort Windows hint file; Windows usually ignores auto-run actions on removable USB drives.
+- USB mass-storage mode is enabled only when USB power is detected.
+- The board is not allowed to enter the USB mass-storage view without a valid USB power condition.
+- When the drive is ejected from Windows, the board exits USB mode and transitions into flight mode.
+- The firmware also accepts EXITUSB over the serial port when the device is in USB mode.
+- The drive is expected to disconnect after leaving USB mode.
+- The FAT volume label is set to AstroNav Nano when the filesystem accepts it, with a shorter fallback if the label is rejected.
 
-Root files
+Root files and directories
 - Settings.ini
 - Howto.txt
 - Website.url
 - autorun.inf
-- logs/
+- /logs/
 
 Settings.ini layout
-- This is the single combined INI file for the device.
-- The PC software should parse it as plain INI text with section headers.
-- Sections:
-  - [files] exposes canonical file names and log locations.
-  - [settings] contains user-editable flight tuning values.
-  - [profile] contains stored device identity and flight summary data.
-  - [debug] contains live health and runtime state.
+- Settings.ini is the combined INI file for the device and is the main contract between the board and PC software.
+- The file is plain text and uses section headers.
+- The current valid sections are:
+  - [files]
+  - [settings]
+  - [profile]
+  - [debug]
 
-Settings.ini keys
+Current Settings.ini keys
 - [files]
   - SETTINGS_FILE = Settings.ini
   - HOWTO_FILE = Howto.txt
@@ -38,93 +38,128 @@ Settings.ini keys
   - LOG_DIRECTORY = /logs
   - LOG_PATTERN = Flight_*.csv
 - [settings]
-  - ESTIMATED_HEIGHT_M: float, expected meters, practical range 0.0 and up.
-  - HEIGHT_MARGIN_M: float, meters, clamped in firmware to 0.0 to 1000.0.
-  - ESTIMATED_SPEED_MPS: float, meters per second, practical range 0.0 and up.
-  - SPEED_MARGIN_MPS: float, meters per second, clamped in firmware to 0.0 to 1000.0.
-  - LAUNCH_THRESHOLD_G: float, g-force threshold, clamped in firmware to 1.15 to 4.00.
+  - ESTIMATED_HEIGHT_M = float, expected apogee estimate in meters
+  - HEIGHT_MARGIN_M = float, extra altitude margin in meters
+  - ESTIMATED_SPEED_MPS = float, expected ascent speed in meters per second
+  - SPEED_MARGIN_MPS = float, extra speed margin in meters per second
+  - LAUNCH_THRESHOLD_G = float, launch confirmation acceleration threshold in g
+  - FIRE_PYRO_APOGEE = boolean, TRUE or FALSE, enables apogee pyro firing when TRUE
 - [profile]
-  - MAGIC: 32-bit hex value, expected 50455246.
-  - VERSION: integer, expected 1.
-  - SERIAL_NUMBER: string, up to 19 visible characters plus the null terminator in firmware.
-  - FLASH_STAMP: string, up to 23 visible characters plus the null terminator in firmware.
-  - FLIGHT_COUNT: unsigned integer, 0 to 4294967295.
-  - LOG_COUNT: unsigned integer, 0 to 4294967295.
-  - MAX_FLIGHT_ALTITUDE_M: float, meters, 0.0 and up.
-  - MAX_FLIGHT_SPEED_MPS: float, meters per second, 0.0 and up.
-  - LAST_FLIGHT_ALTITUDE_M: float, meters, may be negative during descent.
-  - LAST_FLIGHT_SPEED_MPS: float, meters per second, may be negative during descent.
-  - CHECKSUM: 32-bit hex value, 8 uppercase hex digits in firmware output.
+  - MAGIC = 32-bit hex, expected value 50455246
+  - VERSION = integer, expected value 1
+  - SERIAL_NUMBER = ASCII string
+  - FLASH_STAMP = ASCII string
+  - FLIGHT_COUNT = unsigned integer
+  - LOG_COUNT = unsigned integer
+  - MAX_FLIGHT_ALTITUDE_M = float
+  - MAX_FLIGHT_SPEED_MPS = float
+  - LAST_FLIGHT_ALTITUDE_M = float
+  - LAST_FLIGHT_SPEED_MPS = float
+  - CHECKSUM = 32-bit hex value in firmware output
 - [debug]
-  - FAULT_REASON: string, free text or none.
-  - RUNTIME_MODE: string, expected values flight or usb-storage.
-  - STATE: string, expected values boot, calibrating, idle, storage, armed, boost, coast, pyro, landed, or fault.
-  - POWER_MODE: string, expected values Unknown, USB, 1S LiPo, or 2S LiPo.
-  - VIN_VOLTAGE: float, volts, expected around 0.0 to 8.4 depending on supply.
-  - HEALTH_BITS: unsigned integer bitfield, 0 to 255.
-  - HEALTHY: boolean, TRUE or FALSE.
-  - CORE_TICK_OK: boolean, TRUE or FALSE.
-  - HEAP_OK: boolean, TRUE or FALSE.
-  - SPI_OK: boolean, TRUE or FALSE.
-  - IMU_WHOAMI_OK: boolean, TRUE or FALSE.
-  - IMU_CONFIG_OK: boolean, TRUE or FALSE.
-  - IMU_STREAM_OK: boolean, TRUE or FALSE.
-  - BARO_OK: boolean, TRUE or FALSE.
-  - FLASH_FS_OK: boolean, TRUE or FALSE.
-  - USB_STORAGE_OK: boolean, TRUE or FALSE.
-  - VIN_OK: boolean, TRUE or FALSE.
-  - WARNING: boolean, TRUE or FALSE.
-  - CRITICAL: boolean, TRUE or FALSE.
+  - FAULT_REASON = string or none
+  - RUNTIME_MODE = string, values: usb-storage or flight
+  - STATE = string, values: boot, calibrating, idle, storage, armed, boost, coast, pyro, landed, or fault
+  - POWER_MODE = string, values: Unknown, USB, 1S LiPo, 2S LiPo
+  - VIN_VOLTAGE = float in volts
+  - HEALTH_BITS = unsigned integer bitfield, 0 to 255
+  - HEALTHY = TRUE or FALSE
+  - CORE_TICK_OK = TRUE or FALSE
+  - HEAP_OK = TRUE or FALSE
+  - SPI_OK = TRUE or FALSE
+  - IMU_WHOAMI_OK = TRUE or FALSE
+  - IMU_CONFIG_OK = TRUE or FALSE
+  - IMU_STREAM_OK = TRUE or FALSE
+  - BARO_OK = TRUE or FALSE
+  - FLASH_FS_OK = TRUE or FALSE
+  - USB_STORAGE_OK = TRUE or FALSE
+  - VIN_OK = TRUE or FALSE
+  - WARNING = TRUE or FALSE
+  - CRITICAL = TRUE or FALSE
 
-Value type guide
-- Boolean fields use TRUE or FALSE in the current firmware output. A PC UI may also accept 1/0, yes/no, or on/off when editing or importing.
-- Integer fields are unsigned unless the field description says signed or may go negative.
-- Float fields use decimal numbers with a dot separator.
-- Hex fields should be parsed as base 16.
-- Strings are plain ASCII text unless the UI layer intentionally supports more.
+Value type rules
+- Boolean fields are written as TRUE or FALSE.
+- Integer fields are unsigned unless the field description says otherwise.
+- Float values use decimal notation with a dot separator.
+- Hex values are parsed as base 16.
+- Strings are plain text and should be treated as ASCII unless the UI intentionally supports more.
 
 Howto.txt behavior
-- Human-readable instructions for operators and the PC application team.
-- Describes how to edit Settings.ini and how to exit USB mode safely.
-- Should be treated as read-only by the PC application.
+- Howto.txt is operator-facing documentation.
+- It explains how to edit settings, how to exit USB mode safely, and how to understand the current interface.
+- The PC application should treat this file as read-only documentation.
 
 Website.url behavior
-- Standard Windows InternetShortcut file.
-- Use it as a shortcut target in the UI.
+- Website.url is a standard Windows Internet Shortcut file.
+- The UI may open it or present it as a convening link.
 
 autorun.inf behavior
-- Best-effort compatibility file for Windows Explorer.
-- Contains a label, icon, and open hint for AstroNav Nano.
-- Do not rely on it for execution or automation on removable USB media.
+- autorun.inf is a best-effort Windows hint file.
+- It is not the primary execution or control mechanism.
+- The PC application should not rely on autorun.inf for mission-critical logic.
 
-Logs
-- Log files are stored under /logs.
-- Each log is CSV and named like Flight_00000001.csv, Flight_00000002.csv, and so on.
-- The first several rows are metadata comments that start with #.
+Flight state machine contract
+- The current firmware state values are:
+  - boot
+  - calibrating
+  - idle
+  - storage
+  - armed
+  - boost
+  - coast
+  - pyro
+  - landed
+  - fault
+- The firmware does not allow arbitrary transitions; invalid transitions are treated as warnings and the state remains protected by the safe logic.
+- In product use, the board should remain ready for flight while in Idle and should only show a red blinking fault when a fault is active.
+
+Mission log behavior
+- Flight log CSV files are stored under /logs.
+- The naming pattern is Flight_00000001.csv, Flight_00000002.csv, and so on.
+- Each log begins with metadata comments starting with #.
 - The first non-comment row is the CSV header.
-- Each row contains:
-  - counter: unsigned integer sample counter.
-  - ms: unsigned integer milliseconds since boot.
-  - state: string from the state list above.
-  - power: string from the power mode list above.
-  - ax_g, ay_g, az_g: float acceleration values in g.
-  - gx_dps, gy_dps, gz_dps: float gyro values in degrees per second.
-  - temp_c: float temperature in Celsius.
-  - pressure_hpa: float pressure in hPa.
-  - altitude_m: float altitude in meters.
-  - vertical_velocity_mps: float vertical velocity in meters per second.
-  - roll_deg, pitch_deg: float orientation values in degrees.
-  - health_bits: unsigned integer bitfield, 0 to 255.
+- The current log format includes the following columns:
+  - counter
+  - ms
+  - state
+  - power
+  - pyro
+  - ax_g
+  - ay_g
+  - az_g
+  - gx_dps
+  - gy_dps
+  - gz_dps
+  - temp_c
+  - pressure_hpa
+  - altitude_m
+  - vertical_velocity_mps
+  - roll_deg
+  - pitch_deg
+  - health_bits
+- The log is intended to be rich enough for post-flight analysis and debugging.
+- The current sample rate is approximately 10 samples per second and is designed to be responsive without overloading the system.
 
-Recommended UI parsing rules
-- Treat missing optional fields as unknown instead of failing the whole UI.
-- Re-read the manifest if file timestamps change.
-- Validate booleans, integers, floats, and hex values before using them.
-- Use the [files] section to locate the current filenames instead of hard-coding paths.
+Log example header
+- counter,ms,state,power,pyro,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,temp_c,pressure_hpa,altitude_m,vertical_velocity_mps,roll_deg,pitch_deg,health_bits
 
-PC software integration rules
-- Read Settings.ini first to discover the current file names and log directory.
+Recommended PC parsing rules
+- Treat missing optional fields as unknown rather than as fatal errors.
+- Re-read Settings.ini and logs when timestamps or file contents change.
+- Validate integer, float, boolean, and hex values before using them.
+- Use the [files] section to discover current file names instead of hard-coding the root names.
+- Preserve unknown fields and sections when rewriting Settings.ini.
+
+PC application integration rules
+- Read Settings.ini before reading logs or other files.
 - Treat [settings] as editable and [profile] and [debug] as read-only.
-- Refresh the UI when Settings.ini or any log CSV changes.
-- Do not assume uppercase file names.
-- Prefer preserving unknown keys and sections when rewriting Settings.ini.
+- Refresh the UI when Settings.ini or any log file changes.
+- Do not assume the volume label or file names are fixed beyond the current firmware contract.
+- Prefer an incremental refresh model rather than a single one-time parse.
+
+Firmware assumptions reflected here
+- USB-only config path for the current product phase
+- flight state logging during active mission capture
+- USB ejection as the standard way to exit USB mode and continue in flight mode
+- red fast-blink LED for urgent fault indication
+- current parameter set remain the same unless future product revisions intentionally add more tuning values

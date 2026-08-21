@@ -34,6 +34,8 @@ void writeHowtoText(File &file) {
   file.println("  Bigger values widen the safe window for speed checks.");
   file.println("- LAUNCH_THRESHOLD_G: acceleration needed before launch is confirmed.");
   file.println("  Lower values trigger earlier, higher values require a harder launch.");
+  file.println("- FIRE_PYRO_APOGEE: enable pyro firing at apogee when TRUE.");
+  file.println("  Set FALSE to keep logging the apogee event without firing the pyro at apogee.");
   file.println();
   file.println("How to edit Settings.ini:");
   file.println("1. Open Settings.ini in a text editor.");
@@ -67,7 +69,8 @@ void writeSettingsSection(File &file,
              float estimatedSpeedMps,
              float heightMarginM,
              float speedMarginMps,
-             float launchThresholdG) {
+             float launchThresholdG,
+             bool firePyroAtApogee) {
   file.println("[settings]");
   file.println("; AstroNav Nano flight settings");
   file.println("; Edit the values below, then save the file.");
@@ -77,6 +80,7 @@ void writeSettingsSection(File &file,
   printFloatValue(file, "ESTIMATED_SPEED_MPS", estimatedSpeedMps, 1);
   printFloatValue(file, "SPEED_MARGIN_MPS", speedMarginMps, 1);
   printFloatValue(file, "LAUNCH_THRESHOLD_G", launchThresholdG, 2);
+  file.printf("FIRE_PYRO_APOGEE=%s\n", firePyroAtApogee ? "TRUE" : "FALSE");
 }
 
 void writeDebugSection(File &file,
