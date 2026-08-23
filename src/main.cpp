@@ -292,6 +292,7 @@ void syncAssetsFromDeviceProfile();
 void buildFaultReason(char *buffer, size_t bufferSize);
 uint8_t healthBits();
 bool systemHealthy();
+uint32_t countAndCleanFlightLogs();
 
 uint8_t readRegister(uint8_t csPin, uint8_t regAddr, SPISettings settings);
 uint8_t readRegister(uint8_t csPin, uint8_t regAddr);
@@ -933,7 +934,7 @@ uint8_t healthBits() {
 }
 
 void startMissionLog() {
-  currentFlightNumber = deviceProfile.flightCount + 1;
+  currentFlightNumber = countAndCleanFlightLogs() + 1;
   deviceProfile.flightCount = currentFlightNumber;
   assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
   snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(currentFlightNumber));
@@ -985,6 +986,45 @@ void ensureLogsDirectory() {
     return;
   }
   FatFS.mkdir("/logs");
+}
+
+uint32_t countAndCleanFlightLogs() {
+  if (!storageReady) {
+    return 0;
+  }
+
+  File logsDirectory = FatFS.open("/logs", "r");
+  if (!logsDirectory || !logsDirectory.isDirectory()) {
+    return 0;
+  }
+
+  uint32_t flightLogCount = 0;
+  File entry = logsDirectory.openNextFile();
+  while (entry) {
+    String entryName = entry.name();
+    bool validFlightLog = entryName.length() == 19 &&
+                          entryName.startsWith("Flight_") &&
+                          entryName.endsWith(".csv");
+    if (validFlightLog) {
+      for (size_t i = 7; i < 15; i++) {
+        if (!isDigit(entryName[i])) {
+          validFlightLog = false;
+          break;
+        }
+      }
+    }
+
+    entry.close();
+    if (validFlightLog) {
+      flightLogCount++;
+    } else {
+      FatFS.remove(entryName.c_str());
+    }
+    entry = logsDirectory.openNextFile();
+  }
+
+  logsDirectory.close();
+  return flightLogCount;
 }
 
 void cleanupLegacyUsbFiles() {
@@ -1147,44 +1187,44 @@ void flushMissionLogToFlash() {
   logFile.printf("# Flight Number: %lu\n", static_cast<unsigned long>(currentFlightNumber));
   logFile.printf("# Boot Time Ms: %lu\n", static_cast<unsigned long>(bootMs));
   logFile.printf("# Samples: %u\n", missionLogCount);
-  logFile.println("# Columns: counter,ms,state,power,pyro,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,temp_c,pressure_hpa,altitude_m,vertical_velocity_mps,roll_deg,pitch_deg,health_bits");
-  logFile.println("counter,ms,state,power,pyro,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,temp_c,pressure_hpa,altitude_m,vertical_velocity_mps,roll_deg,pitch_deg,health_bits");
+  logFile.println("# Columns: counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;health_bits");
+  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;health_bits");
   for (uint16_t i = 0; i < missionLogCount; i++) {
     const FlightSample &sample = missionLog[i];
     logFile.print(static_cast<unsigned long>(sample.counter));
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(static_cast<unsigned long>(sample.ms));
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(stateText(static_cast<FlightState>(sample.state)));
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(powerModeText(powerMode));
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(static_cast<unsigned>(sample.pyro));
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.axMg / 1000.0f, 3);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.ayMg / 1000.0f, 3);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.azMg / 1000.0f, 3);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.gxDps10 / 10.0f, 2);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.gyDps10 / 10.0f, 2);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.gzDps10 / 10.0f, 2);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.tempCd10 / 10.0f, 1);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.pressureHd10 / 10.0f, 2);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.altitudeCm / 100.0f, 2);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.velocityCms / 100.0f, 2);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.rollD10 / 10.0f, 1);
-    logFile.print(',');
+    logFile.print(';');
     logFile.print(sample.pitchD10 / 10.0f, 1);
-    logFile.print(',');
+    logFile.print(';');
     logFile.println(static_cast<unsigned>(sample.healthBits));
   }
 
