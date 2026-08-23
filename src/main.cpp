@@ -72,6 +72,7 @@ static constexpr float STATIONARY_ACCEL_TOLERANCE_G = 0.08f;
 static constexpr float STATIONARY_GYRO_TOLERANCE_DPS = 20.0f;
 static constexpr float LAUNCH_THRESHOLD_G = 1.35f;
 static constexpr uint8_t LAUNCH_CONFIRM_SAMPLES = 3;
+static constexpr uint8_t BOOST_DECAY_CONFIRM_SAMPLES = 3;
 static constexpr uint32_t LAUNCH_MIN_TIME_MS = 400;
 static constexpr float APOGEE_DROP_M = 0.25f;
 static constexpr float APOGEE_VELOCITY_THRESHOLD_MPS = -0.25f;
@@ -235,6 +236,7 @@ float gyroBiasZ = 0.0f;
 float lastAltitudeForVelocity = 0.0f;
 
 uint8_t launchConfirmCount = 0;
+uint8_t boostDecayConfirmCount = 0;
 uint8_t apogeeConfirmCount = 0;
 uint8_t landingConfirmCount = 0;
 uint32_t logCounter = 0;
@@ -340,7 +342,8 @@ bool setFlightState(FlightState nextState) {
       allowed = (nextState == FlightState::Boost || nextState == FlightState::Fault);
       break;
     case FlightState::Boost:
-      allowed = (nextState == FlightState::Coast || nextState == FlightState::PyroFired || nextState == FlightState::Fault);
+      allowed = (nextState == FlightState::Coast || nextState == FlightState::PyroFired ||
+                 nextState == FlightState::Landed || nextState == FlightState::Fault);
       break;
     case FlightState::Coast:
       allowed = (nextState == FlightState::PyroFired || nextState == FlightState::Landed || nextState == FlightState::Fault);
@@ -365,7 +368,7 @@ bool setFlightState(FlightState nextState) {
   }
 
   flightState = nextState;
-  if (missionStarted || storageReady) {
+  if (missionStarted) {
     appendMissionSample();
   }
   return true;
@@ -938,6 +941,7 @@ void startMissionLog() {
   peakAltitude = 0.0f;
   lastAltitudeForVelocity = 0.0f;
   launchConfirmCount = 0;
+  boostDecayConfirmCount = 0;
   apogeeConfirmCount = 0;
   landingConfirmCount = 0;
   missionStarted = true;
@@ -1098,8 +1102,6 @@ void enterFlightModeFromUsb() {
   setFlightState(FlightState::Calibrating);
   if (calibratePadOrientation()) {
     setFlightState(FlightState::Idle);
-    startMissionLog();
-    appendMissionSample();
   } else {
     boardHealth.critical = true;
     recordFaultAndSafeStop();
@@ -1147,30 +1149,43 @@ void flushMissionLogToFlash() {
   logFile.printf("# Samples: %u\n", missionLogCount);
   logFile.println("# Columns: counter,ms,state,power,pyro,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,temp_c,pressure_hpa,altitude_m,vertical_velocity_mps,roll_deg,pitch_deg,health_bits");
   logFile.println("counter,ms,state,power,pyro,ax_g,ay_g,az_g,gx_dps,gy_dps,gz_dps,temp_c,pressure_hpa,altitude_m,vertical_velocity_mps,roll_deg,pitch_deg,health_bits");
-  char line[220];
   for (uint16_t i = 0; i < missionLogCount; i++) {
     const FlightSample &sample = missionLog[i];
-    snprintf(line, sizeof(line),
-             "%lu,%lu,%s,%s,%u,%.3f,%.3f,%.3f,%.2f,%.2f,%.2f,%.1f,%.2f,%.2f,%.2f,%.1f,%.1f,%u",
-             static_cast<unsigned long>(sample.counter),
-             static_cast<unsigned long>(sample.ms),
-             stateText(static_cast<FlightState>(sample.state)),
-             powerModeText(powerMode),
-             static_cast<unsigned>(sample.pyro),
-             sample.axMg / 1000.0f,
-             sample.ayMg / 1000.0f,
-             sample.azMg / 1000.0f,
-             sample.gxDps10 / 10.0f,
-             sample.gyDps10 / 10.0f,
-             sample.gzDps10 / 10.0f,
-             sample.tempCd10 / 10.0f,
-             sample.pressureHd10 / 10.0f,
-             sample.altitudeCm / 100.0f,
-             sample.velocityCms / 100.0f,
-             sample.rollD10 / 10.0f,
-             sample.pitchD10 / 10.0f,
-             sample.healthBits);
-    logFile.println(line);
+    logFile.print(static_cast<unsigned long>(sample.counter));
+    logFile.print(',');
+    logFile.print(static_cast<unsigned long>(sample.ms));
+    logFile.print(',');
+    logFile.print(stateText(static_cast<FlightState>(sample.state)));
+    logFile.print(',');
+    logFile.print(powerModeText(powerMode));
+    logFile.print(',');
+    logFile.print(static_cast<unsigned>(sample.pyro));
+    logFile.print(',');
+    logFile.print(sample.axMg / 1000.0f, 3);
+    logFile.print(',');
+    logFile.print(sample.ayMg / 1000.0f, 3);
+    logFile.print(',');
+    logFile.print(sample.azMg / 1000.0f, 3);
+    logFile.print(',');
+    logFile.print(sample.gxDps10 / 10.0f, 2);
+    logFile.print(',');
+    logFile.print(sample.gyDps10 / 10.0f, 2);
+    logFile.print(',');
+    logFile.print(sample.gzDps10 / 10.0f, 2);
+    logFile.print(',');
+    logFile.print(sample.tempCd10 / 10.0f, 1);
+    logFile.print(',');
+    logFile.print(sample.pressureHd10 / 10.0f, 2);
+    logFile.print(',');
+    logFile.print(sample.altitudeCm / 100.0f, 2);
+    logFile.print(',');
+    logFile.print(sample.velocityCms / 100.0f, 2);
+    logFile.print(',');
+    logFile.print(sample.rollD10 / 10.0f, 1);
+    logFile.print(',');
+    logFile.print(sample.pitchD10 / 10.0f, 1);
+    logFile.print(',');
+    logFile.println(static_cast<unsigned>(sample.healthBits));
   }
 
   logFile.flush();
@@ -1352,6 +1367,7 @@ void updateFlightStateFromSamples() {
     if (launchConfirmCount >= LAUNCH_CONFIRM_SAMPLES) {
       launchMs = millis();
       launchConfirmCount = 0;
+      startMissionLog();
       apogeeConfirmCount = 0;
       landingConfirmCount = 0;
       setFlightState(FlightState::Boost);
@@ -1366,6 +1382,15 @@ void updateFlightStateFromSamples() {
       }
 
       if (boostDecayDetected) {
+        if (boostDecayConfirmCount < 255) {
+          boostDecayConfirmCount++;
+        }
+      } else {
+        boostDecayConfirmCount = 0;
+      }
+
+      if (boostDecayConfirmCount >= BOOST_DECAY_CONFIRM_SAMPLES) {
+        boostDecayConfirmCount = 0;
         setFlightState(FlightState::Coast);
       }
     }
@@ -1404,20 +1429,23 @@ void updateFlightStateFromSamples() {
     }
   }
 
-  if (pyroLatched && missionStarted && !missionLogFlushed) {
+  bool postLaunchState = flightState == FlightState::Boost ||
+                         flightState == FlightState::Coast ||
+                         flightState == FlightState::PyroFired;
+  if (postLaunchState && missionStarted && !missionLogFlushed) {
     bool landingCandidate = false;
+    bool stationary = accelMag <= 1.15f &&
+                      magnitude3(currentGx - gyroBiasX,
+                                 currentGy - gyroBiasY,
+                                 currentGz - gyroBiasZ) <= STATIONARY_GYRO_TOLERANCE_DPS;
     if (baroReliable && imuReliable) {
-      landingCandidate = (currentAltitude <= flightLandingAltitudeToleranceM &&
-                          fabsf(currentVerticalVelocity) <= flightLandingVelocityToleranceMPS &&
-                          accelMag <= 1.15f &&
-                          gravityProjection >= 0.8f);
+      landingCandidate = (fabsf(currentVerticalVelocity) <= flightLandingVelocityToleranceMPS &&
+                          stationary);
     } else if (baroReliable) {
-      landingCandidate = (currentAltitude <= flightLandingAltitudeToleranceM &&
-                          fabsf(currentVerticalVelocity) <= flightLandingVelocityToleranceMPS &&
+      landingCandidate = (fabsf(currentVerticalVelocity) <= flightLandingVelocityToleranceMPS &&
                           (millis() - launchMs) > LAUNCH_MIN_TIME_MS);
     } else if (imuReliable) {
-      landingCandidate = (accelMag <= 1.15f &&
-                          gravityProjection >= 0.8f &&
+      landingCandidate = (stationary &&
                           (millis() - launchMs) > LAUNCH_MIN_TIME_MS);
     }
 
@@ -1630,8 +1658,11 @@ void loop() {
       boardHealth.warning = true;
     }
 
-    if (boardHealth.imuStreamOk && boardHealth.baroOk && !boardHealth.critical) {
+    if ((boardHealth.imuStreamOk || boardHealth.baroOk) && !boardHealth.critical) {
       updateFlightStateFromSamples();
+    }
+
+    if (missionStarted) {
       appendMissionSample();
     }
 
