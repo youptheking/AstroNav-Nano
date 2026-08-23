@@ -251,6 +251,8 @@ bool calibratePadOrientation() {
   float pressureSum = 0.0f;
 
   while (millis() < deadline) {
+    updateStatusLed();
+
     float ax = 0.0f;
     float ay = 0.0f;
     float az = 0.0f;
@@ -309,7 +311,9 @@ bool calibratePadOrientation() {
         filteredPressure = pressureSum * invCount;
         baselinePressureHpa = filteredPressure;
         filteredAltitude = 0.0f;
+        currentAltitude = 0.0f;
         currentVerticalVelocity = 0.0f;
+        lastAltitudeForVelocity = 0.0f;
         return true;
       }
     } else {

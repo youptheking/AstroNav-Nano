@@ -1185,7 +1185,9 @@ void setStatusLED(uint8_t r, uint8_t g, uint8_t b) {
 
 void setLedProfile(LedProfile profile) {
   float pulse = 1.0f;
-  if (profile != LedProfile::Fault) {
+  if (profile == LedProfile::Calibrating) {
+    pulse = (millis() % 500UL) < 250UL ? 1.0f : 0.0f;
+  } else if (profile != LedProfile::Fault) {
     uint32_t now = millis();
     float phase = static_cast<float>((now % 2000UL)) / 2000.0f;
     pulse = 0.10f + 0.90f * (0.5f + 0.5f * sinf(phase * 6.2831853f));
@@ -1200,7 +1202,7 @@ void setLedProfile(LedProfile profile) {
       scaleAndSet(255, 255, 255);
       break;
     case LedProfile::Calibrating:
-      scaleAndSet(0, 255, 255);
+      scaleAndSet(255, 255, 0);
       break;
     case LedProfile::Idle:
       scaleAndSet(0, 255, 96);
