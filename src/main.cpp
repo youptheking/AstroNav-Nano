@@ -688,7 +688,7 @@ void ensureDeviceSerial() {
     return;
   }
 
-  assets.Device_Key = String("AN-") + OldCodeTemporary::generateRandomKey(8);
+  assets.Device_Key = OldCodeTemporary::generateRandomKey(10);
   snprintf(deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber), "%s", assets.Device_Key.c_str());
 }
 
