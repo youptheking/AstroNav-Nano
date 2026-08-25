@@ -1,6 +1,97 @@
 # AstroNav Nano Firmware Documentation
 
-## Overview
+## IMPORTANT DISCLAIMER - READ FIRST
+
+This product and software are only intended to be used exactly as documented by AstroNav.
+
+Any use outside of intended operation, testing process, electrical limits, legal regulations, launch rules, or safety procedures is strictly at your own risk.
+
+By building, flashing, testing, powering, wiring, arming, or operating this firmware and hardware, you accept full responsibility for all outcomes.
+
+You are 100% responsible for safe use, legal compliance, damage prevention, and risk control.
+
+The author/maintainer assumes zero liability for:
+
+- injury, death, fire, explosion, or other physical harm
+- property damage or equipment loss
+- data loss, mission loss, or business loss
+- legal, regulatory, insurance, or certification consequences
+- misuse, wiring mistakes, assembly defects, or unsafe test setups
+
+If you do not fully understand and accept these terms, do not use this product or software.
+
+## IDE setup (VS Code + PlatformIO)
+
+### 1) Install PlatformIO
+
+In VS Code:
+
+- open the Extensions view
+- install the PlatformIO IDE extension
+- reload VS Code after installation
+
+### 2) Open the project folder
+
+Open the repository folder in VS Code, then let PlatformIO detect the project.
+
+### 3) Build the firmware
+
+Use either the PlatformIO sidebar build button or:
+
+```powershell
+pio run
+```
+
+### 4) Upload to the board
+
+```powershell
+pio run --target upload --upload-port COM3
+```
+
+Replace COM3 with your board's actual COM port.
+
+### 5) Monitor serial output
+
+```powershell
+pio device monitor
+```
+
+### 6) Common Windows dependency issue
+
+If PlatformIO reports missing Git while resolving dependencies, install Git and ensure this path is on PATH:
+
+```text
+C:\Program Files\Git\cmd
+```
+
+Then reload VS Code and build again.
+
+## Basic how-it-works summary
+
+At a high level, this firmware does four things:
+
+- checks hardware health at boot
+- determines power source and enters the proper mode
+- runs a flight state machine (launch, coast, pyro, landing, fault)
+- logs mission data for later review
+
+Power behavior:
+
+- on USB power, the board can enter USB storage mode for settings/configuration
+- in flight mode, the board samples sensors and updates state continuously
+
+Pyro behavior:
+
+- normal pyro firing is controlled by apogee logic and settings
+- a test-only serial command (PYROTEST) exists and is intentionally dangerous
+
+Companion software note:
+
+This firmware is intended to work with a separate PC companion software project in another repository. That PC repo is currently not publicly available, but it is planned to be made accessible soon.
+
+## Detailed explanation
+
+### Overview
 
 This firmware is the flight and safety controller for the AstroNav Nano board. Its purpose is to:
 
@@ -12,11 +103,11 @@ This firmware is the flight and safety controller for the AstroNav Nano board. I
 - detect launch, apogee, pyro firing, landing, and fault states
 - continuously log as much sensor and state information as practical
 
-The firmware is designed for reliability and safe behavior under real flight conditions, while keeping the configuration simple and user-accessible over USB.
+The firmware is designed for reliability and safe behavior under real flight conditions while keeping configuration simple and user-accessible over USB.
 
-## Power and USB behavior
+### Power and USB behavior
 
-### USB power detection
+#### USB power detection
 
 The board checks voltage on the VIN sense input before deciding whether it is running on USB power or battery power.
 
@@ -27,13 +118,11 @@ The board checks voltage on the VIN sense input before deciding whether it is ru
 
 The board only enters USB mass-storage mode when USB power is detected.
 
-### USB ejection exit behavior
+#### USB ejection exit behavior
 
-When the device is in USB mode and the host safely ejects or disconnects the drive, the firmware sets a USB exit request, and the board transitions into flight mode.
+When the device is in USB mode and the host safely ejects or disconnects the drive, the firmware sets a USB exit request and transitions into flight mode.
 
-This is intentionally used as the device programming and launch preparation path while keeping the USB configuration surface simple.
-
-## Flight state machine
+### Flight state machine
 
 The firmware uses the following states:
 
@@ -50,69 +139,69 @@ The firmware uses the following states:
 
 The state transitions are intentionally limited so that only valid transitions occur. A bad transition is treated as a warning and may be logged as a fault condition.
 
-### State description
+#### State description
 
 - Booting: startup health checks and low-level initialization
-- Calibrating: IMU and barometer are used to establish a stable reference frame
-- Idle: the board is ready for launch and waiting for launch-trigger conditions
+- Calibrating: IMU and barometer establish a stable reference frame
+- Idle: board is ready for launch and waiting for trigger conditions
 - UsbMode: USB drive is active and settings can be edited
-- Boost: launch acceleration is detected and flight is in ascent
-- Coast: acceleration has dropped, flight is still in progress but no longer powered by boost
+- Boost: launch acceleration detected and flight is ascending
+- Coast: acceleration dropped, flight still active without boost thrust
 - PyroFired: apogee detection triggered pyro output
 - Landed: landing confirmed from stable ground conditions
-- Fault: critical fault, red blinking LED, system latched in a safe state
+- Fault: critical fault, red blinking LED, system latched safe
 
-## Launch, apogee, and landing detection
+### Launch, apogee, and landing detection
 
-Flight state changes are evaluated every sensor sample. The sensor loop runs at 100 ms, which gives about 10 samples per second. This is the current target cadence and is intentionally kept efficient so the system can respond quickly without excessive memory or CPU load.
+Flight state changes are evaluated every sensor sample. The loop runs at 100 ms (about 10 samples per second).
 
-### Launch detection
+#### Launch detection
 
-The board watches for sustained acceleration above the configured launch threshold.
+The board watches for sustained acceleration above launch threshold.
 
 - launch threshold parameter: LAUNCH_THRESHOLD_G
 - default value: 1.35
 
-Launch detection uses the IMU first. If the IMU is not trustworthy, the system falls back to the altitude/velocity trend to decide whether the craft is in launch.
+Launch detection uses IMU first. If IMU is not trustworthy, the firmware falls back to altitude and velocity trends.
 
-### Apogee detection
+#### Apogee detection
 
-Once the flight is in boost/coast, the code checks for:
+During boost/coast, the code checks for:
 
-- altitude drop from the peak value
+- altitude drop from peak
 - downward velocity below threshold
 - low acceleration condition
 - minimum flight time requirement
 
-This is used to fire the pyro system at the correct time.
+When criteria are met and enabled, the pyro channel can fire.
 
-### Landing detection
+#### Landing detection
 
-After pyro is fired, landing confirmation requires the board to see that the craft has settled and is no longer descending quickly.
+After pyro event, landing confirmation checks that craft has settled.
 
-The system uses:
+The system combines:
 
-- low altitude
+- low altitude trend
 - low vertical velocity
 - low acceleration
-- gravity alignment check when available
+- gravity alignment checks when available
 
-The landing check is intentionally conservative. It uses multiple sensor cues and requires sustained confirmation before declaring Landed.
+This is intentionally conservative and requires sustained confirmation.
 
-## Sensor fallback logic
+### Sensor fallback logic
 
-The firmware is designed to use all available sensor values and to keep relying on the healthiest sources when one sensor misbehaves.
+The firmware is designed to continue safely using healthy sensor paths when one source degrades.
 
-### IMU priority
+#### IMU priority
 
 The IMU is used for:
 
 - launch detection
-- orientation calculation
+- orientation estimation
 - acceleration magnitude
 - gravity direction estimation
 
-### Barometer priority
+#### Barometer priority
 
 The barometer is used for:
 
@@ -120,23 +209,21 @@ The barometer is used for:
 - vertical velocity estimation
 - apogee and landing confirmation
 
-### Fallback behavior
+#### Fallback behavior
 
 When one sensor is noisy, stale, or invalid:
 
-- the firmware uses the remaining valid sensor path to continue flight-state logic
-- a bad sensor does not automatically force a fault unless the fault is critical
-- the state logic keeps using whichever source is still healthy
+- remaining valid sensors continue to drive state logic
+- non-critical sensor faults do not force immediate fault state
+- warning/fault handling still protects outputs
 
-This is important for reliability during short flights where a sensor can occasionally misread or drift.
+### Logging strategy
 
-## Logging strategy
+The firmware logs mission data continuously for post-flight analysis.
 
-The firmware logs as much useful information as possible.
+#### Mission log format
 
-### Mission log format
-
-The CSV log includes:
+CSV log fields include:
 
 - counter
 - time in ms
@@ -152,22 +239,18 @@ The CSV log includes:
 - roll and pitch
 - health bits
 
-This is designed to support post-flight debugging and data review.
+#### Logging cadence
 
-### Logging cadence
-
-The default sample period is 100 ms, which produces roughly 10 samples per second.
-
-This is chosen to balance:
+Default sample period is 100 ms (about 10 Hz), balancing:
 
 - data richness
-- flash storage capacity
-- response time for launch detection
-- minimal impact on other system functions
+- flash capacity
+- response latency
+- low runtime overhead
 
-## USB settings
+### USB settings
 
-The current USB settings remain intentionally small and practical:
+Current user-editable settings:
 
 - ESTIMATED_HEIGHT_M
 - HEIGHT_MARGIN_M
@@ -176,112 +259,47 @@ The current USB settings remain intentionally small and practical:
 - LAUNCH_THRESHOLD_G
 - FIRE_PYRO_APOGEE
 
-These are the current user-editable parameters in the USB settings file. They are sufficient for the current product phase and leave space for later tuning extensions if needed.
+#### FIRE_PYRO_APOGEE
 
-### FIRE_PYRO_APOGEE
+Boolean behavior:
 
-This is a boolean setting used to enable or disable pyro firing at apogee.
+- TRUE: apogee detection can fire pyro output
+- FALSE: apogee is still detected/logged, but no pyro pulse is fired
 
-- TRUE: apogee detection can fire the pyro output
-- FALSE: apogee conditions are still logged and detected, but no pyro pulse is fired at apogee
+### Test-only serial pyro command (danger)
 
-This is useful for testing, safe commissioning, or future mission profiles where the apogee event should be detected without actuating the pyro channel.
+WARNING: This command can energize the pyro output and can cause ignition if hardware is connected. Misuse can lead to fire, injury, equipment loss, or legal/safety violations.
 
-The values are kept in the same structure as the current firmware design and are edited over USB without requiring a serial command interface.
-
-## Test-only serial pyro command (danger)
-
-WARNING: This command can energize the pyro output and can cause ignition if hardware is connected. Misuse can lead to fire, injury, equipment loss, or legal/safety violations. Use only on a controlled bench setup with full safety procedures, no live motor, and a verified safe load.
-
-For controlled test work, a serial command is available:
+For controlled test work only:
 
 - command: PYROTEST
-- behavior: you must send PYROTEST twice
+- behavior: send PYROTEST twice
 - confirmation window: second command must arrive within 5 seconds
-- mode restriction: command is accepted only in flight states (Idle/Armed/Boost/Coast/PyroFired/Landed), never in USB storage mode
+- mode restriction: accepted only in flight states (Idle/Armed/Boost/Coast/PyroFired/Landed), never in USB storage mode
 - pulse safety limit: pyro output auto-disables after 1 second
 
-If the second command is not sent in time, or if any different command is sent, confirmation is cleared and you must start again.
+If confirmation is not completed in time, you must start again.
 
-This path exists only for deliberate test operations and should be treated as hazardous every time.
+### Fault handling and LED behavior
 
-## Fault handling and LED behavior
-
-Faults are treated as high-priority events.
+Faults are high-priority:
 
 - fault state is latched
 - pyro output is disabled safely
-- status LED is red
-- red LED blinks rapidly to attract attention
+- status LED turns red
+- red LED blinks rapidly for critical attention
 
-This is the primary visual signal that the board should not be launched when red blinking is active.
+### Safety principles
 
-If a person ignores the warning and attempts launch anyway, the system still behaves safely and maintains fault-safe outputs.
-
-## Safety principles
-
-The design follows these priorities:
+Design priorities:
 
 1. Safe default behavior
 2. No unsafe state transitions
-3. Use every good sensor available
-4. Log every major flight event and state change
-5. Keep the user-visible interface simple over USB
-6. Keep the system ready for launch while never masking a real fault condition
-
-## Compile in VS Code with PlatformIO
-
-### 1) Install PlatformIO
-
-In VS Code:
-
-- open the Extensions view
-- install the PlatformIO IDE extension
-- reload VS Code after installation
-
-### 2) Open the project folder
-
-Open the repository folder in VS Code, then let PlatformIO detect the project.
-
-### 3) Build the firmware
-
-Use either:
-
-- the PlatformIO toolbar in the left sidebar, or
-- the terminal command:
-
-```powershell
-pio run
-```
-
-### 4) Upload to the board
-
-Connect the RP2350 board and use the upload target:
-
-```powershell
-pio run --target upload --upload-port COM3
-```
-
-If your board is on a different COM port, replace `COM3` with the correct port shown in Device Manager or the PlatformIO port selector.
-
-### 5) Monitor serial output
-
-```powershell
-pio device monitor
-```
-
-or from the PlatformIO toolbar.
-
-### 6) Common issue on Windows
-
-If PlatformIO complains that Git is missing when installing a dependency, make sure Git is installed and available on PATH. A common Windows path is:
-
-```text
-C:\Program Files\Git\cmd
-```
-
-After installing Git, reload VS Code and retry the build.
+3. Use every healthy sensor source
+4. Log major events and state changes
+5. Keep the user-facing interface simple
+6. Never hide real fault conditions
 
 ## Documentation note
 
-The current source files are the source of truth for behavior. This README documents the intended product behavior and operation in a form that can be reviewed and extended later.
+The current source files remain the source of truth for behavior. This README describes intended operation and safety context for integration and review.
