@@ -189,6 +189,22 @@ This is useful for testing, safe commissioning, or future mission profiles where
 
 The values are kept in the same structure as the current firmware design and are edited over USB without requiring a serial command interface.
 
+## Test-only serial pyro command (danger)
+
+WARNING: This command can energize the pyro output and can cause ignition if hardware is connected. Misuse can lead to fire, injury, equipment loss, or legal/safety violations. Use only on a controlled bench setup with full safety procedures, no live motor, and a verified safe load.
+
+For controlled test work, a serial command is available:
+
+- command: PYROTEST
+- behavior: you must send PYROTEST twice
+- confirmation window: second command must arrive within 5 seconds
+- mode restriction: command is accepted only in flight states (Idle/Armed/Boost/Coast/PyroFired/Landed), never in USB storage mode
+- pulse safety limit: pyro output auto-disables after 1 second
+
+If the second command is not sent in time, or if any different command is sent, confirmation is cleared and you must start again.
+
+This path exists only for deliberate test operations and should be treated as hazardous every time.
+
 ## Fault handling and LED behavior
 
 Faults are treated as high-priority events.

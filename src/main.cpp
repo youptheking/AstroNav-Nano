@@ -81,7 +81,8 @@ static constexpr uint8_t APOGEE_CONFIRM_SAMPLES = 3;
 static constexpr float LANDING_ALTITUDE_TOLERANCE_M = 2.0f;
 static constexpr float LANDING_VELOCITY_TOLERANCE_MPS = 0.25f;
 static constexpr uint8_t LANDING_CONFIRM_SAMPLES = 15;
-static constexpr uint32_t PYRO_PULSE_MS = 350;
+static constexpr uint32_t PYRO_PULSE_MS = 1000;
+static constexpr uint32_t PYRO_TEST_CONFIRM_WINDOW_MS = 5000;
 static constexpr uint32_t MAX_FLIGHT_TIME_MS = 45000;
 static constexpr uint16_t FLIGHT_LOG_CAPACITY = 2048;
 static constexpr uint32_t PROFILE_MAGIC = 0x50455246;   // "FRFP"
@@ -208,6 +209,8 @@ uint32_t lastLogMs = 0;
 uint32_t lastUsbSettingsPollMs = 0;
 char serialCommandBuffer[48] = {0};
 uint8_t serialCommandLength = 0;
+bool pyroTestPendingConfirm = false;
+uint32_t pyroTestConfirmUntilMs = 0;
 
 float currentVinVoltage = 0.0f;
 float currentAx = 0.0f;
@@ -1154,6 +1157,10 @@ void handleSerialCommand(const char *command) {
     return;
   }
 
+  if (pyroTestPendingConfirm && millis() > pyroTestConfirmUntilMs) {
+    pyroTestPendingConfirm = false;
+  }
+
   char upperCommand[48] = {0};
   size_t len = strlen(command);
   if (len >= sizeof(upperCommand)) {
@@ -1164,6 +1171,42 @@ void handleSerialCommand(const char *command) {
     upperCommand[i] = static_cast<char>(toupper(static_cast<unsigned char>(command[i])));
   }
   upperCommand[len] = '\0';
+
+  if (strcmp(upperCommand, "PYROTEST") == 0) {
+    bool inFlightState =
+      flightState == FlightState::Idle ||
+      flightState == FlightState::Armed ||
+      flightState == FlightState::Boost ||
+      flightState == FlightState::Coast ||
+      flightState == FlightState::PyroFired ||
+      flightState == FlightState::Landed;
+
+    if (pyroLatched) {
+      pyroTestPendingConfirm = false;
+      Serial.println("[PYROTEST] Ignored: pyro has already fired.");
+      return;
+    }
+
+    if (!inFlightState) {
+      pyroTestPendingConfirm = false;
+      Serial.println("[PYROTEST] Blocked: command requires flight mode (not USB storage mode).");
+      return;
+    }
+
+    if (!pyroTestPendingConfirm) {
+      pyroTestPendingConfirm = true;
+      pyroTestConfirmUntilMs = millis() + PYRO_TEST_CONFIRM_WINDOW_MS;
+      Serial.println("[PYROTEST] WARNING: Send PYROTEST again within 5s to ignite pyro output.");
+      return;
+    }
+
+    pyroTestPendingConfirm = false;
+    Serial.println("[PYROTEST] WARNING: Igniting pyro output now.");
+    firePyro();
+    return;
+  }
+
+  pyroTestPendingConfirm = false;
 
   if ((strcmp(upperCommand, "FLIGHT") == 0 || strcmp(upperCommand, "EXITUSB") == 0 || strcmp(upperCommand, "ARM") == 0) &&
       powerMode == PowerMode::USB && !usbFlightOverride) {

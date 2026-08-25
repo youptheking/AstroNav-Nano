@@ -65,7 +65,7 @@ static constexpr uint32_t CALIBRATION_TIMEOUT_MS = 6000;
 static constexpr uint8_t CALIBRATION_GOOD_SAMPLES = 20;
 static constexpr float STATIONARY_ACCEL_TOLERANCE_G = 0.08f;
 static constexpr float STATIONARY_GYRO_TOLERANCE_DPS = 20.0f;
-static constexpr uint32_t PYRO_PULSE_MS = 350;
+static constexpr uint32_t PYRO_PULSE_MS = 1000;
 static constexpr uint32_t MAX_FLIGHT_TIME_MS = 45000;
 
 bool testCoreTick() {
