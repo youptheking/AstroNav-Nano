@@ -63,7 +63,7 @@ static constexpr float VIN_DIVIDER_BOTTOM_OHMS = 10000.0f;
 static constexpr float VIN_DIVIDER_RATIO =
   (VIN_DIVIDER_TOP_OHMS + VIN_DIVIDER_BOTTOM_OHMS) / VIN_DIVIDER_BOTTOM_OHMS;
 
-static constexpr uint32_t SAMPLE_PERIOD_MS = 100;
+static constexpr uint32_t SAMPLE_PERIOD_MS = 50;
 static constexpr uint32_t LED_PERIOD_MS = 25;
 static constexpr uint32_t BOOT_PULSE_MS = 2000;
 static constexpr uint32_t CALIBRATION_TIMEOUT_MS = 6000;
@@ -83,6 +83,8 @@ static constexpr float LANDING_VELOCITY_TOLERANCE_MPS = 0.25f;
 static constexpr uint8_t LANDING_CONFIRM_SAMPLES = 15;
 static constexpr uint32_t PYRO_PULSE_MS = 1000;
 static constexpr uint32_t PYRO_TEST_CONFIRM_WINDOW_MS = 5000;
+static constexpr uint32_t APOGEE_FIRE_MAX_MS = 500;
+static constexpr uint8_t APOGEE_HOLD_SAMPLES = 8;
 static constexpr uint32_t MAX_FLIGHT_TIME_MS = 45000;
 static constexpr uint16_t FLIGHT_LOG_CAPACITY = 2048;
 static constexpr uint32_t PROFILE_MAGIC = 0x50455246;   // "FRFP"
@@ -242,6 +244,8 @@ uint8_t launchConfirmCount = 0;
 uint8_t boostDecayConfirmCount = 0;
 uint8_t apogeeConfirmCount = 0;
 uint8_t landingConfirmCount = 0;
+uint8_t apogeePeakHoldCount = 0;
+uint32_t apogeePeakHoldStartMs = 0;
 uint32_t logCounter = 0;
 float peakFlightSpeedMps = 0.0f;
 
@@ -937,7 +941,9 @@ uint8_t healthBits() {
 }
 
 void startMissionLog() {
-  currentFlightNumber = countAndCleanFlightLogs() + 1;
+  uint32_t countedLogs = countAndCleanFlightLogs();
+  uint32_t persistedFlightCount = deviceProfile.flightCount;
+  currentFlightNumber = (countedLogs > persistedFlightCount ? countedLogs : persistedFlightCount) + 1u;
   deviceProfile.flightCount = currentFlightNumber;
   assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
   snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(currentFlightNumber));
@@ -948,6 +954,8 @@ void startMissionLog() {
   boostDecayConfirmCount = 0;
   apogeeConfirmCount = 0;
   landingConfirmCount = 0;
+  apogeePeakHoldCount = 0;
+  apogeePeakHoldStartMs = 0;
   missionStarted = true;
   missionLogFlushed = false;
   logCounter = 0;
@@ -1285,6 +1293,8 @@ void setLedProfile(LedProfile profile) {
   float pulse = 1.0f;
   if (profile == LedProfile::Calibrating) {
     pulse = (millis() % 500UL) < 250UL ? 1.0f : 0.0f;
+  } else if (profile == LedProfile::Landed) {
+    pulse = (millis() % 400UL) < 200UL ? 1.0f : 0.0f;
   } else if (profile != LedProfile::Fault) {
     uint32_t now = millis();
     float phase = static_cast<float>((now % 2000UL)) / 2000.0f;
@@ -1419,8 +1429,27 @@ void updateFlightStateFromSamples() {
   currentAltitude = altitudeFromPressure(filteredPressure);
   filteredAltitude = (filteredAltitude * 0.80f) + (currentAltitude * 0.20f);
   currentAltitude = filteredAltitude;
-  if (currentAltitude > peakAltitude) {
-    peakAltitude = currentAltitude;
+  if (flightState == FlightState::Boost || flightState == FlightState::Coast) {
+    if (currentAltitude > peakAltitude) {
+      peakAltitude = currentAltitude;
+      apogeePeakHoldCount = 0;
+      apogeePeakHoldStartMs = millis();
+    } else {
+      uint32_t holdDeltaMs = millis() - apogeePeakHoldStartMs;
+      if (holdDeltaMs <= APOGEE_FIRE_MAX_MS) {
+        if (currentAltitude >= peakAltitude - 0.02f && fabsf(currentVerticalVelocity) <= 0.50f) {
+          if (apogeePeakHoldCount < 255) {
+            apogeePeakHoldCount++;
+          }
+        } else {
+          apogeePeakHoldCount = 0;
+          apogeePeakHoldStartMs = millis();
+        }
+      } else {
+        apogeePeakHoldCount = 0;
+        apogeePeakHoldStartMs = millis();
+      }
+    }
   }
 
   float rawVelocity = (currentAltitude - lastAltitudeForVelocity) / (SAMPLE_PERIOD_MS / 1000.0f);
@@ -1450,6 +1479,9 @@ void updateFlightStateFromSamples() {
     if (launchConfirmCount >= LAUNCH_CONFIRM_SAMPLES) {
       launchMs = millis();
       launchConfirmCount = 0;
+      peakAltitude = currentAltitude;
+      apogeePeakHoldCount = 0;
+      apogeePeakHoldStartMs = millis();
       startMissionLog();
       apogeeConfirmCount = 0;
       landingConfirmCount = 0;
@@ -1498,9 +1530,19 @@ void updateFlightStateFromSamples() {
       apogeeConfirmCount = 0;
     }
 
+    bool peakHoldFire = flightSettings.firePyroAtApogee &&
+                        apogeePeakHoldCount >= APOGEE_HOLD_SAMPLES &&
+                        (millis() - apogeePeakHoldStartMs) <= APOGEE_FIRE_MAX_MS;
+
     if (flightSettings.firePyroAtApogee && apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
       firePyro();
       apogeeConfirmCount = 0;
+      apogeePeakHoldCount = 0;
+      apogeePeakHoldStartMs = 0;
+    } else if (peakHoldFire) {
+      firePyro();
+      apogeePeakHoldCount = 0;
+      apogeePeakHoldStartMs = 0;
     }
 
     if (!flightSettings.firePyroAtApogee && apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
@@ -1659,6 +1701,9 @@ void setup() {
       setFlightState(FlightState::Fault);
     } else {
       setFlightState(FlightState::Idle);
+      if (!missionStarted) {
+        startMissionLog();
+      }
     }
   }
 
