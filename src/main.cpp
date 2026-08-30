@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "hardware_control.h"
+#include "otp_memory.h"
 #include "usb_info_files.h"
 
 #ifndef AUTO_VERSION
@@ -690,6 +691,13 @@ void makeDefaultDeviceProfile() {
 }
 
 void ensureDeviceSerial() {
+  uint32_t otpSerialNumber = 0;
+  if (astroNavOtpGetSerialNumber(otpSerialNumber) && otpSerialNumber != 0) {
+    formatAstroNavDisplaySerial(otpSerialNumber, deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber));
+    assets.Device_Key = deviceProfile.serialNumber;
+    return;
+  }
+
   if (!isPlaceholderSerial(deviceProfile.serialNumber)) {
     assets.Device_Key = deviceProfile.serialNumber;
     return;
@@ -823,6 +831,9 @@ void persistDeviceProfile() {
   }
 
   ensureDeviceSerial();
+  AstroNav_OTP_Data otpData = {};
+  bool otpReadable = readAstroNavOtpData(otpData);
+  const AstroNavOtpStatus &otpStatus = getAstroNavOtpStatus();
 
   updateDeviceProfileChecksum();
   File infoFile = FatFS.open(DEVICE_INFO_FILE, "w");
@@ -863,6 +874,31 @@ void persistDeviceProfile() {
   infoFile.print("LAST_FLIGHT_SPEED_MPS=");
   infoFile.println(deviceProfile.lastFlightSpeedMps, 1);
   infoFile.printf("CHECKSUM=%08lX\n", static_cast<unsigned long>(deviceProfile.checksum));
+  infoFile.println();
+  infoFile.println("[otp]");
+  infoFile.printf("OTP_READ_OK=%s\n", otpReadable ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_MAGIC_VALID=%s\n", otpStatus.has_magic_header ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_PROGRAMMED_THIS_BOOT=%s\n", astroNavOtpWasProgrammedThisBoot() ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_SIGNATURE_MATCHES_BUILD=%s\n", otpStatus.signature_matches_build ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_OFFICIAL_SIGNATURE=%s\n", otpStatus.official_signature ? "TRUE" : "FALSE");
+  if (otpReadable) {
+    char otpDisplaySerial[16] = {0};
+    formatAstroNavDisplaySerial(otpData.serial_number, otpDisplaySerial, sizeof(otpDisplaySerial));
+    infoFile.printf("OTP_MAGIC_HEADER=%08lX\n", static_cast<unsigned long>(otpData.magic_header));
+    infoFile.printf("OTP_MANUFACTURER_ID=%s\n", otpData.manufacturer_id);
+    infoFile.printf("OTP_PRODUCT_ID=%s\n", otpData.product_id);
+    infoFile.printf("OTP_HARDWARE_MAJOR=%u\n", static_cast<unsigned int>(otpData.hardware_major));
+    infoFile.printf("OTP_HARDWARE_MINOR=%u\n", static_cast<unsigned int>(otpData.hardware_minor));
+    infoFile.printf("OTP_PRODUCTION_DATE=%s\n", otpData.production_date);
+    infoFile.printf("OTP_PRODUCTION_SECOND=%u\n", static_cast<unsigned int>(otpData.reserved[0]));
+    infoFile.printf("OTP_PRODUCTION_TIMESTAMP=%s-%02u\n", otpData.production_date, static_cast<unsigned int>(otpData.reserved[0]));
+    infoFile.printf("OTP_SERIAL_NUMBER=%s\n", otpDisplaySerial);
+    infoFile.printf("OTP_INITIAL_FIRMWARE=%u.%u.%u\n",
+                    static_cast<unsigned int>(otpData.initial_firmware[0]),
+                    static_cast<unsigned int>(otpData.initial_firmware[1]),
+                    static_cast<unsigned int>(otpData.initial_firmware[2]));
+    infoFile.printf("OTP_WARRANTY_SIGNATURE=%08lX\n", static_cast<unsigned long>(otpData.warranty_signature));
+  }
   infoFile.println();
   UsbInfoFiles::writeDebugSection(infoFile,
                                   lastFaultReason,
@@ -1215,6 +1251,11 @@ void handleSerialCommand(const char *command) {
   }
 
   pyroTestPendingConfirm = false;
+
+  if (strcmp(upperCommand, "DUMP_OTP") == 0) {
+    printAstroNavOtpSummary();
+    return;
+  }
 
   if ((strcmp(upperCommand, "FLIGHT") == 0 || strcmp(upperCommand, "EXITUSB") == 0 || strcmp(upperCommand, "ARM") == 0) &&
       powerMode == PowerMode::USB && !usbFlightOverride) {
@@ -1609,6 +1650,9 @@ void setup() {
   Serial.println("=============================================");
   Serial.println("  AstroNav flight firmware");
   Serial.println("=============================================");
+
+  initializeAstroNavOtp();
+  printAstroNavOtpSummary();
 
   pinMode(PIN_PYRO, OUTPUT);
   pinMode(PIN_SERVO_1, OUTPUT);
