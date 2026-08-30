@@ -1,4 +1,5 @@
 import datetime
+import csv
 import hashlib
 import hmac
 import json
@@ -6,12 +7,14 @@ import os
 import pathlib
 import re
 import secrets
+import base64
 import struct
 import subprocess
 import sys
 import ctypes
 import atexit
 import importlib
+import time
 
 COMMAND_LINE_TARGETS = []
 
@@ -27,9 +30,11 @@ try:
 except Exception:
     pass
 
-SECRETS_ROOT = pathlib.Path(r"C:\Users\Youp\Documents\GitHub\YoupSpace_Secrets")
+SECRETS_ROOT = pathlib.Path.home() / "Documents" / "GitHub" / "YoupSpace_Secrets"
 SECRET_KEY_PATH = SECRETS_ROOT / "warranty_key.txt"
-SERIAL_REGISTRY_PATH = SECRETS_ROOT / "serial_registry.txt"
+SERIAL_REGISTRY_CSV_PATH = SECRETS_ROOT / "serial_registry.csv"
+LEGACY_SERIAL_REGISTRY_PATH = SECRETS_ROOT / "serial_registry.txt"
+SERIAL_REGISTRY_PATH = SERIAL_REGISTRY_CSV_PATH
 PENDING_SERIAL_PATH = SECRETS_ROOT / "pending_serial.json"
 DEFAULT_OUTPUT_HEADER = pathlib.Path("include") / "build_info.h"
 MAGIC_HEADER = 0xA57B09A2
@@ -44,15 +49,19 @@ ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
 ANSI_CYAN = "\033[36m"
 SERIAL_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+TRUE_ENV_VALUES = {"1", "true", "yes", "y", "on"}
 
 UPLOAD_STATUS = {
     "requested": False,
-    "completed": False,
     "serial_number": None,
     "key_mode": "dummy",
+    "track_serial": False,
+    "upload_port": "",
 }
 
 SEMANTIC_TAG_PATTERN = re.compile(r"^(?:firmware[-_])?v?(\d+)\.(\d+)\.(\d+)$")
+DISPLAY_SERIAL_PATTERN = re.compile(r"^(?:AN-)?[0-9A-Z]{10}$")
+OTP_SERIAL_LINE_PATTERN = re.compile(r"\[OTP\]\s+serial_number=([0-9A-Z-]+)", re.IGNORECASE)
 
 
 def try_import_platformio_env():
@@ -140,6 +149,78 @@ def get_platformio_option(platformio_env, option_name, fallback=""):
         return fallback
 
 
+def resolve_upload_port(platformio_env):
+    def normalize_upload_port_value(value_text):
+        value = str(value_text).strip().strip('"').strip("'")
+        if not value:
+            return ""
+
+        upper_value = value.upper()
+        if upper_value.startswith("COM") or value.startswith("/dev/"):
+            return value
+
+        try:
+            decoded = base64.b64decode(value, validate=True).decode("ascii", errors="ignore").strip()
+        except Exception:
+            return value
+
+        decoded_upper = decoded.upper()
+        if decoded_upper.startswith("COM") or decoded.startswith("/dev/"):
+            return decoded
+        return value
+
+    try:
+        scons_arguments = getattr(scons_script, "ARGUMENTS", {})
+    except Exception:
+        scons_arguments = {}
+
+    if isinstance(scons_arguments, dict):
+        for key in ("UPLOAD_PORT", "upload_port"):
+            value = normalize_upload_port_value(scons_arguments.get(key, ""))
+            if value:
+                return value
+
+    for index, token in enumerate(COMMAND_LINE_TARGETS):
+        if token.startswith("--upload-port="):
+            value = normalize_upload_port_value(token.split("=", 1)[1])
+            if value:
+                return value
+
+        if token in ("--upload-port", "-P") and index + 1 < len(COMMAND_LINE_TARGETS):
+            value = normalize_upload_port_value(COMMAND_LINE_TARGETS[index + 1])
+            if value:
+                return value
+
+    env_upload_port = normalize_upload_port_value(os.getenv("UPLOAD_PORT", ""))
+    if env_upload_port:
+        return env_upload_port
+
+    env_upload_port = normalize_upload_port_value(os.getenv("ASTRONAV_UPLOAD_PORT", ""))
+    if env_upload_port:
+        return env_upload_port
+
+    option_upload_port = normalize_upload_port_value(get_platformio_option(platformio_env, "upload_port", ""))
+    if option_upload_port:
+        return option_upload_port
+
+    if platformio_env is not None:
+        try:
+            resolved = normalize_upload_port_value(platformio_env.subst("$UPLOAD_PORT"))
+            if resolved and resolved != "$UPLOAD_PORT":
+                return resolved
+        except Exception:
+            pass
+
+        try:
+            resolved = normalize_upload_port_value(platformio_env.get("UPLOAD_PORT", ""))
+            if resolved:
+                return resolved
+        except Exception:
+            pass
+
+    return ""
+
+
 def color_text(color_code, message):
     return f"{color_code}{message}{ANSI_RESET}"
 
@@ -173,6 +254,13 @@ def format_display_serial(serial_number):
 
 def build_status_suffix(serial_number, key_mode):
     return f" [serial={format_display_serial(serial_number)} key={key_mode}]"
+
+
+def parse_bool_env(var_name):
+    value = os.getenv(var_name)
+    if value is None:
+        return False
+    return value.strip().lower() in TRUE_ENV_VALUES
 
 
 def enable_windows_virtual_terminal():
@@ -209,29 +297,186 @@ def parse_uint32(value_text):
     return value
 
 
-def load_registered_serials():
+def normalize_display_serial_text(value_text):
+    if value_text is None:
+        return None
+
+    candidate = str(value_text).strip().upper()
+    if not candidate:
+        return None
+    if not DISPLAY_SERIAL_PATTERN.fullmatch(candidate):
+        return None
+    if candidate.startswith("AN-"):
+        return candidate
+    return f"AN-{candidate}"
+
+
+def ensure_serial_registry_csv_exists():
     if not SECRETS_ROOT.exists():
         raise RuntimeError(f"FATAL: Required secrets folder not found: {SECRETS_ROOT}")
 
-    if not SERIAL_REGISTRY_PATH.exists():
-        SERIAL_REGISTRY_PATH.write_text("", encoding="ascii")
+    if SERIAL_REGISTRY_CSV_PATH.exists():
+        return
 
-    serials = set()
-    for line_number, line in enumerate(SERIAL_REGISTRY_PATH.read_text(encoding="ascii").splitlines(), start=1):
-        stripped = line.strip()
-        if not stripped:
-            continue
+    legacy_entries = []
+    if LEGACY_SERIAL_REGISTRY_PATH.exists():
+        for line in LEGACY_SERIAL_REGISTRY_PATH.read_text(encoding="ascii").splitlines():
+            stripped = line.strip()
+            if stripped:
+                legacy_entries.append(stripped)
 
-        try:
-            value = int(stripped, 10)
-        except ValueError as error:
-            raise RuntimeError(f"FATAL: Invalid serial_registry.txt entry on line {line_number}: '{stripped}'") from error
+    with SERIAL_REGISTRY_CSV_PATH.open("w", encoding="ascii", newline="") as registry_file:
+        writer = csv.writer(registry_file)
+        writer.writerow(["serial_number"])
+        for value in legacy_entries:
+            writer.writerow([value])
 
-        if value < 0 or value > 0xFFFFFFFF:
-            raise RuntimeError(f"FATAL: Serial registry value out of uint32 range on line {line_number}: '{stripped}'")
-        serials.add(value)
+    if legacy_entries:
+        print(color_text(ANSI_CYAN, f"INFO: Migrated {len(legacy_entries)} serial entries from {LEGACY_SERIAL_REGISTRY_PATH.name} to {SERIAL_REGISTRY_CSV_PATH.name}."))
+
+
+def load_registered_serials():
+    ensure_serial_registry_csv_exists()
+
+    serials = {
+        "numeric": set(),
+        "display": set(),
+    }
+    with SERIAL_REGISTRY_PATH.open("r", encoding="ascii", newline="") as registry_file:
+        reader = csv.reader(registry_file)
+        for line_number, row in enumerate(reader, start=1):
+            if not row:
+                continue
+
+            stripped = str(row[0]).strip()
+            if not stripped:
+                continue
+
+            if line_number == 1 and stripped.lower() in ("serial", "serial_number", "serialnumber"):
+                continue
+
+            parsed_display = normalize_display_serial_text(stripped)
+            if parsed_display is not None:
+                serials["display"].add(parsed_display)
+                continue
+
+            try:
+                value = int(stripped, 10)
+            except ValueError as error:
+                raise RuntimeError(
+                    f"FATAL: Invalid {SERIAL_REGISTRY_PATH.name} entry on line {line_number}: '{stripped}'. "
+                    "Expected decimal uint32 or AN-XXXXXXXXXX format."
+                ) from error
+
+            if value < 0 or value > 0xFFFFFFFF:
+                raise RuntimeError(f"FATAL: Serial registry value out of uint32 range on line {line_number}: '{stripped}'")
+            serials["numeric"].add(value)
 
     return serials
+
+
+def serial_exists_in_registry(serial_number, registered_serials):
+    display_serial = format_display_serial(serial_number)
+    return (
+        serial_number in registered_serials["numeric"]
+        or display_serial in registered_serials["display"]
+    )
+
+
+def append_display_serial_if_missing(display_serial):
+    normalized = normalize_display_serial_text(display_serial)
+    if normalized is None:
+        raise RuntimeError(f"FATAL: Invalid display serial format: '{display_serial}'")
+
+    registered_serials = load_registered_serials()
+    if normalized in registered_serials["display"]:
+        print(color_text(ANSI_YELLOW, f"INFO: Serial already present in {SERIAL_REGISTRY_PATH.name}. Continuing without adding: {normalized}"))
+        return False
+
+    with SERIAL_REGISTRY_PATH.open("a", encoding="ascii", newline="") as registry_file:
+        writer = csv.writer(registry_file)
+        writer.writerow([normalized])
+
+    print(color_text(ANSI_GREEN, f"SUCCESS: Uploaded AstroNav serial number recorded. [serial={normalized}]"))
+    return True
+
+
+def clear_pending_if_matches_display_serial(display_serial):
+    pending_record = load_pending_serial_record()
+    if pending_record is None:
+        return
+
+    pending_serial = parse_uint32(pending_record.get("serial_number"))
+    if pending_serial is None:
+        return
+
+    if format_display_serial(pending_serial) == display_serial:
+        PENDING_SERIAL_PATH.unlink(missing_ok=True)
+
+
+def read_otp_display_serial_from_device(upload_port):
+    try:
+        import serial  # type: ignore
+        from serial.tools import list_ports  # type: ignore
+    except Exception:
+        print(color_text(ANSI_YELLOW, "WARNING: pyserial not available in PlatformIO Python environment. OTP serial readback skipped."))
+        return None
+
+    def query_port(port_name):
+        try:
+            with serial.Serial(port_name, 115200, timeout=0.25, write_timeout=1) as port:
+                port.reset_input_buffer()
+                port.write(b"\nDUMP_OTP\n")
+
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    raw_line = port.readline()
+                    if not raw_line:
+                        continue
+
+                    text_line = raw_line.decode("utf-8", errors="ignore").strip()
+                    if not text_line:
+                        continue
+
+                    match = OTP_SERIAL_LINE_PATTERN.search(text_line)
+                    if not match:
+                        continue
+
+                    parsed = normalize_display_serial_text(match.group(1))
+                    if parsed is not None:
+                        return parsed
+        except Exception:
+            return None
+
+        return None
+
+    preferred_port = upload_port.strip()
+    if not preferred_port:
+        print(color_text(ANSI_YELLOW, "WARNING: Upload port is unknown. Scanning available serial ports for OTP readback."))
+
+    discovery_deadline = time.monotonic() + 12.0
+    while time.monotonic() < discovery_deadline:
+        candidate_ports = []
+        if preferred_port:
+            candidate_ports.append(preferred_port)
+
+        try:
+            for port_info in list_ports.comports():
+                device_name = str(getattr(port_info, "device", "")).strip()
+                if device_name and device_name not in candidate_ports:
+                    candidate_ports.append(device_name)
+        except Exception:
+            pass
+
+        for candidate in candidate_ports:
+            parsed = query_port(candidate)
+            if parsed is not None:
+                return parsed
+
+        time.sleep(0.4)
+
+    print(color_text(ANSI_YELLOW, "WARNING: OTP serial line not received from device. Readback skipped."))
+    return None
 
 
 def load_pending_serial_record():
@@ -262,6 +507,30 @@ def build_pending_serial_context(version, hardware_major, hardware_minor, initia
     }
 
 
+def has_reusable_pending_serial(version, hardware_major, hardware_minor, initial_firmware, key_mode):
+    pending_context = build_pending_serial_context(
+        version,
+        hardware_major,
+        hardware_minor,
+        initial_firmware,
+        key_mode,
+    )
+    existing_record = load_pending_serial_record()
+    if existing_record is None:
+        return False
+
+    existing_serial = parse_uint32(existing_record.get("serial_number"))
+    if existing_serial is None:
+        raise RuntimeError("FATAL: Pending serial file is missing a valid serial_number.")
+
+    # Ignore stale pending records that were already committed.
+    if serial_exists_in_registry(existing_serial, load_registered_serials()):
+        return False
+
+    existing_context = {key: existing_record.get(key) for key in pending_context}
+    return existing_context == pending_context
+
+
 def assign_unique_serial_number(version, hardware_major, hardware_minor, initial_firmware, key_mode):
     registered_serials = load_registered_serials()
     pending_context = build_pending_serial_context(
@@ -276,21 +545,20 @@ def assign_unique_serial_number(version, hardware_major, hardware_minor, initial
         existing_serial = parse_uint32(existing_record.get("serial_number"))
         if existing_serial is None:
             raise RuntimeError("FATAL: Pending serial file is missing a valid serial_number.")
-        if existing_serial in registered_serials:
-            raise RuntimeError(
-                f"FATAL: Pending serial number {existing_serial} is already present in serial_registry.txt."
-            )
-
-        existing_context = {key: existing_record.get(key) for key in pending_context}
-        if existing_context == pending_context:
-            print(color_text(ANSI_CYAN, f"INFO: Reusing pending AstroNav serial number: {format_display_serial(existing_serial)}"))
-            production_second = int(existing_record.get("production_second", 0))
-            return existing_record["production_date"], production_second, existing_serial
+        if serial_exists_in_registry(existing_serial, registered_serials):
+            PENDING_SERIAL_PATH.unlink(missing_ok=True)
+            existing_record = None
+        else:
+            existing_context = {key: existing_record.get(key) for key in pending_context}
+            if existing_context == pending_context:
+                print(color_text(ANSI_CYAN, f"INFO: Reusing pending AstroNav serial number: {format_display_serial(existing_serial)}"))
+                production_second = int(existing_record.get("production_second", 0))
+                return existing_record["production_date"], production_second, existing_serial
 
     serial_number = secrets.randbits(32)
-    if serial_number in registered_serials:
+    if serial_exists_in_registry(serial_number, registered_serials):
         raise RuntimeError(
-            f"FATAL: Generated serial number collision for {serial_number}. Aborting build to prevent duplicates."
+            f"FATAL: Generated serial number collision for {format_display_serial(serial_number)}. Aborting build to prevent duplicates."
         )
 
     pending_record = dict(pending_context)
@@ -304,21 +572,35 @@ def assign_unique_serial_number(version, hardware_major, hardware_minor, initial
     return pending_record["production_date"], pending_record["production_second"], serial_number
 
 
+def resolve_serial_number_for_build(should_assign_serial, version, hardware_major, hardware_minor, initial_firmware, key_mode):
+    if should_assign_serial:
+        return assign_unique_serial_number(version, hardware_major, hardware_minor, initial_firmware, key_mode)
+
+    # Build-only runs should never consume manufacturing serial numbers.
+    now = datetime.datetime.now()
+    print(color_text(ANSI_YELLOW, "INFO: Build-only run detected. Not reserving a manufacturing serial number."))
+    return now.strftime("%H-%M-%d-%m-%Y"), now.second, 0
+
+
 def commit_uploaded_serial_number():
     registered_serials = load_registered_serials()
     pending_record = load_pending_serial_record()
     if pending_record is None:
-        print(color_text(ANSI_YELLOW, "WARNING: No pending serial record found after upload. Nothing was written to serial_registry.txt."))
+        print(color_text(ANSI_YELLOW, f"WARNING: No pending serial record found after upload. Nothing was written to {SERIAL_REGISTRY_PATH.name}."))
         return
 
     serial_number = parse_uint32(pending_record.get("serial_number"))
     if serial_number is None:
         raise RuntimeError("FATAL: Pending serial file is missing a valid serial_number.")
-    if serial_number in registered_serials:
-        raise RuntimeError(f"FATAL: Uploaded serial number {serial_number} is already present in serial_registry.txt.")
+    if serial_exists_in_registry(serial_number, registered_serials):
+        PENDING_SERIAL_PATH.unlink(missing_ok=True)
+        print(color_text(ANSI_YELLOW, f"INFO: Serial already present in {SERIAL_REGISTRY_PATH.name}. Continuing without adding: {format_display_serial(serial_number)}"))
+        return
 
-    with SERIAL_REGISTRY_PATH.open("a", encoding="ascii", newline="\n") as registry_file:
-        registry_file.write(f"{serial_number}\n")
+    display_serial = format_display_serial(serial_number)
+    with SERIAL_REGISTRY_PATH.open("a", encoding="ascii", newline="") as registry_file:
+        writer = csv.writer(registry_file)
+        writer.writerow([display_serial])
 
     PENDING_SERIAL_PATH.unlink(missing_ok=True)
     key_mode = str(pending_record.get("key_mode") or "dummy")
@@ -421,31 +703,36 @@ def register_platformio_upload_hook(platformio_env):
         return
 
     UPLOAD_STATUS["requested"] = any(target == "upload" for target in COMMAND_LINE_TARGETS)
-
-    def after_upload(source, target, env):
-        del source
-        del target
-        del env
-        UPLOAD_STATUS["completed"] = True
-        suffix = build_status_suffix(UPLOAD_STATUS["serial_number"], UPLOAD_STATUS["key_mode"])
-        print(color_text(ANSI_GREEN, f"SUCCESS: AstroNav upload completed.{suffix}"))
-        commit_uploaded_serial_number()
-
-    platformio_env.AddPostAction("upload", after_upload)
+    UPLOAD_STATUS["upload_port"] = resolve_upload_port(platformio_env)
 
 
-def report_upload_failure_if_needed():
-    if not UPLOAD_STATUS["requested"] or UPLOAD_STATUS["completed"]:
+def finalize_upload_status():
+    if not UPLOAD_STATUS["requested"]:
         return
 
     failures = get_build_failures()
-    if not failures:
+    if failures:
+        serial_number = UPLOAD_STATUS["serial_number"]
+        key_mode = UPLOAD_STATUS["key_mode"]
+        suffix = build_status_suffix(serial_number, key_mode) if serial_number is not None else ""
+        print(color_text(ANSI_RED, f"FAILED: AstroNav upload failed.{suffix}"))
         return
 
-    serial_number = UPLOAD_STATUS["serial_number"]
-    key_mode = UPLOAD_STATUS["key_mode"]
-    suffix = build_status_suffix(serial_number, key_mode) if serial_number is not None else ""
-    print(color_text(ANSI_RED, f"FAILED: AstroNav upload failed.{suffix}"))
+    otp_display_serial = read_otp_display_serial_from_device(UPLOAD_STATUS["upload_port"])
+    if otp_display_serial is not None:
+        print(color_text(ANSI_CYAN, f"INFO: OTP readback serial: {otp_display_serial}"))
+        append_display_serial_if_missing(otp_display_serial)
+        clear_pending_if_matches_display_serial(otp_display_serial)
+        print(color_text(ANSI_GREEN, "SUCCESS: AstroNav upload completed."))
+        return
+
+    if UPLOAD_STATUS["track_serial"]:
+        suffix = build_status_suffix(UPLOAD_STATUS["serial_number"], UPLOAD_STATUS["key_mode"])
+        print(color_text(ANSI_YELLOW, f"WARNING: OTP readback unavailable. Falling back to pending serial commit.{suffix}"))
+        commit_uploaded_serial_number()
+    else:
+        print(color_text(ANSI_GREEN, "SUCCESS: AstroNav upload completed."))
+        print(color_text(ANSI_YELLOW, "INFO: Service upload mode and OTP readback unavailable. Serial list unchanged."))
 
 
 def main(cli_args):
@@ -470,7 +757,34 @@ def main(cli_args):
         initial_firmware,
     )
     key_mode = preview_key_mode()
-    production_date, production_second, serial_number = assign_unique_serial_number(version, hardware_major, hardware_minor, initial_firmware, key_mode)
+
+    if UPLOAD_STATUS["requested"]:
+        is_new_board_armed = parse_bool_env("ASTRONAV_NEW_BOARD")
+        has_pending = has_reusable_pending_serial(
+            version,
+            hardware_major,
+            hardware_minor,
+            initial_firmware,
+            key_mode,
+        )
+
+        UPLOAD_STATUS["track_serial"] = is_new_board_armed or has_pending
+
+        if is_new_board_armed:
+            print(color_text(ANSI_CYAN, "INFO: New-board arming detected (ASTRONAV_NEW_BOARD=1)."))
+        elif has_pending:
+            print(color_text(ANSI_CYAN, "INFO: Reusing existing pending serial for upload retry."))
+        else:
+            print(color_text(ANSI_YELLOW, "INFO: Existing-firmware upload detected. Serial list unchanged. Set ASTRONAV_NEW_BOARD=1 only for first-time OTP provisioning."))
+
+    production_date, production_second, serial_number = resolve_serial_number_for_build(
+        UPLOAD_STATUS["track_serial"],
+        version,
+        hardware_major,
+        hardware_minor,
+        initial_firmware,
+        key_mode,
+    )
     UPLOAD_STATUS["serial_number"] = serial_number
     UPLOAD_STATUS["key_mode"] = key_mode
     secret_key, official_signature = get_secret_key_bytes()
@@ -514,4 +828,4 @@ else:
     main([sys.argv[0]])
 
 
-atexit.register(report_upload_failure_if_needed)
+atexit.register(finalize_upload_status)

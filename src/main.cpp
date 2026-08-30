@@ -879,7 +879,7 @@ void persistDeviceProfile() {
   infoFile.printf("OTP_READ_OK=%s\n", otpReadable ? "TRUE" : "FALSE");
   infoFile.printf("OTP_MAGIC_VALID=%s\n", otpStatus.has_magic_header ? "TRUE" : "FALSE");
   infoFile.printf("OTP_PROGRAMMED_THIS_BOOT=%s\n", astroNavOtpWasProgrammedThisBoot() ? "TRUE" : "FALSE");
-  infoFile.printf("OTP_SIGNATURE_MATCHES_BUILD=%s\n", otpStatus.signature_matches_build ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_PROFILE_MATCHES_CURRENT_BUILD=%s\n", otpStatus.signature_matches_build ? "TRUE" : "FALSE");
   infoFile.printf("OTP_OFFICIAL_SIGNATURE=%s\n", otpStatus.official_signature ? "TRUE" : "FALSE");
   if (otpReadable) {
     char otpDisplaySerial[16] = {0};
@@ -1104,9 +1104,7 @@ bool configureUsbVolumeLabel() {
     return false;
   }
 
-  fatfs::f_setlabel(USB_VOLUME_LABEL);
-  fatfs::f_setlabel("AstroNavNano");
-  fatfs::f_setlabel("AstroNav");
+  fatfs::f_setlabel("ASTRONAV");
 
   return true;
 }
@@ -1128,15 +1126,8 @@ void ensureUsbInfoFiles() {
   howToFile.flush();
   howToFile.close();
 
-  File autorunFile = FatFS.open(AUTORUN_FILE, "w");
-  if (!autorunFile) {
-    boardHealth.warning = true;
-    return;
-  }
-
-  UsbInfoFiles::writeAutorunInf(autorunFile);
-  autorunFile.flush();
-  autorunFile.close();
+  // Avoid autorun metadata to reduce Windows trust/scanning warnings.
+  FatFS.remove(AUTORUN_FILE);
 
   File websiteFile = FatFS.open(WEBSITE_FILE, "w");
   if (!websiteFile) {

@@ -238,7 +238,8 @@ void printAstroNavOtpSummary() {
                 static_cast<unsigned int>(data.initial_firmware[2]));
   Serial.printf("[OTP] warranty_signature=0x%08lX\n", static_cast<unsigned long>(data.warranty_signature));
   Serial.printf("[OTP] magic_header_valid=%s\n", data.magic_header == kAstroNavMagicHeader ? "YES" : "NO");
-  Serial.printf("[OTP] signature_matches_build=%s\n", otpStatus.signature_matches_build ? "YES" : "NO");
+  Serial.printf("[OTP] profile_matches_current_build=%s\n", otpStatus.signature_matches_build ? "YES" : "NO");
+  Serial.println("[OTP] note: OTP is immutable after first write, so this can be NO on newer firmware builds.");
   Serial.printf("[OTP] official_build_signature=%s\n", otpStatus.official_signature ? "YES" : "NO");
   Serial.printf("[OTP] programmed_this_boot=%s\n", otpStatus.write_succeeded ? "YES" : "NO");
   Serial.print("[OTP] reserved=");
