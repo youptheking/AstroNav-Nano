@@ -60,6 +60,9 @@ UPLOAD_STATUS = {
 }
 
 SEMANTIC_TAG_PATTERN = re.compile(r"^(?:firmware[-_])?v?(\d+)\.(\d+)\.(\d+)$")
+SEMANTIC_DESCRIBE_PATTERN = re.compile(
+    r"^(?P<tag>(?:firmware[-_])?v?\d+\.\d+\.\d+)-(?P<ahead>\d+)-g(?P<sha>[0-9a-fA-F]+)$"
+)
 DISPLAY_SERIAL_PATTERN = re.compile(r"^(?:AN-)?[0-9A-Z]{10}$")
 OTP_SERIAL_LINE_PATTERN = re.compile(r"\[OTP\]\s+serial_number=([0-9A-Z-]+)", re.IGNORECASE)
 
@@ -98,7 +101,39 @@ def parse_semantic_firmware_tag(tag_text):
     }
 
 
+def build_semantic_commit_version(version_parts, ahead_count, commit_sha):
+    return f"V{version_parts[0]}.{version_parts[1]}.{version_parts[2]}_{ahead_count}_{commit_sha.lower()}"
+
+
+def parse_semantic_describe_output(describe_text):
+    if not describe_text:
+        return None
+
+    match = SEMANTIC_DESCRIBE_PATTERN.fullmatch(describe_text.strip())
+    if not match:
+        return None
+
+    base_info = parse_semantic_firmware_tag(match.group("tag"))
+    if base_info is None:
+        return None
+
+    ahead_count = int(match.group("ahead"))
+    commit_sha = match.group("sha").lower()
+    return {
+        "tag": build_semantic_commit_version(base_info["version"], ahead_count, commit_sha),
+        "version": base_info["version"],
+        "base_tag": base_info["tag"],
+        "ahead_count": ahead_count,
+        "commit_sha": commit_sha,
+    }
+
+
 def get_required_firmware_tag_info():
+    try:
+        head_short_sha = run_git_command(["git", "rev-parse", "--short=7", "HEAD"]).lower()
+    except Exception as error:
+        raise RuntimeError("FATAL: Unable to read git commit hash for HEAD.") from error
+
     try:
         head_tags = run_git_command(["git", "tag", "--points-at", "HEAD", "--sort=-v:refname"])
     except Exception as error:
@@ -107,11 +142,53 @@ def get_required_firmware_tag_info():
     for candidate in head_tags.splitlines():
         parsed = parse_semantic_firmware_tag(candidate)
         if parsed is not None:
+            parsed["base_tag"] = parsed["tag"]
+            parsed["ahead_count"] = 0
+            parsed["commit_sha"] = head_short_sha
+            parsed["tag"] = build_semantic_commit_version(parsed["version"], 0, head_short_sha)
             return parsed
 
-    raise RuntimeError(
-        "FATAL: The current commit must have a semantic firmware git tag such as 'firmware-v1.1.0' or 'v1.1.0'."
+    if parse_bool_env("ASTRONAV_REQUIRE_HEAD_TAG"):
+        raise RuntimeError(
+            "FATAL: The current commit must have a semantic firmware git tag such as 'firmware-v1.1.0' or 'v1.1.0'."
+        )
+
+    try:
+        describe_text = run_git_command(
+            [
+                "git",
+                "describe",
+                "--tags",
+                "--long",
+                "--match",
+                "firmware-v[0-9]*.[0-9]*.[0-9]*",
+                "--match",
+                "v[0-9]*.[0-9]*.[0-9]*",
+                "HEAD",
+            ]
+        )
+    except Exception as error:
+        raise RuntimeError(
+            "FATAL: No semantic tag found on HEAD and unable to derive one from commit history. "
+            "Tag the commit (for example 'firmware-v1.1.0') or ensure a prior semantic tag exists."
+        ) from error
+
+    described = parse_semantic_describe_output(describe_text)
+    if described is None:
+        raise RuntimeError(
+            "FATAL: No usable semantic firmware tag was found. "
+            "Expected a tag like 'firmware-v1.1.0' or 'v1.1.0' on HEAD or in reachable history."
+        )
+
+    print(
+        color_text(
+            ANSI_YELLOW,
+            f"INFO: HEAD is {described['ahead_count']} commit(s) ahead of semantic tag {described['base_tag']}. "
+            f"Using {described['tag']}.",
+        )
     )
+
+    return described
 
 
 def validate_required_build_values(firmware_tag_info, version, production_date, production_second, hardware_major, hardware_minor, initial_firmware):
@@ -679,7 +756,7 @@ def c_string_literal(value):
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def generate_header(output_path, version, hardware_major, hardware_minor, production_date, production_second, serial_number, initial_firmware, warranty_signature, official_signature):
+def generate_header(output_path, version, hardware_major, hardware_minor, production_date, production_second, serial_number, initial_firmware, firmware_ahead_count, firmware_commit_sha, warranty_signature, official_signature):
     header_text = f'''#pragma once
 
 #define AUTO_VERSION "{c_string_literal(version)}"
@@ -693,6 +770,8 @@ def generate_header(output_path, version, hardware_major, hardware_minor, produc
 #define ASTRONAV_BUILD_INITIAL_FIRMWARE_MAJOR {initial_firmware[0]}
 #define ASTRONAV_BUILD_INITIAL_FIRMWARE_MINOR {initial_firmware[1]}
 #define ASTRONAV_BUILD_INITIAL_FIRMWARE_PATCH {initial_firmware[2]}
+#define ASTRONAV_BUILD_FIRMWARE_AHEAD_COUNT {firmware_ahead_count}
+#define ASTRONAV_BUILD_FIRMWARE_COMMIT_SHA "{c_string_literal(str(firmware_commit_sha).lower())}"
 '''
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(header_text, encoding="ascii")
@@ -807,6 +886,8 @@ def main(cli_args):
         production_second,
         serial_number,
         initial_firmware,
+        int(firmware_tag_info.get("ahead_count", 0)),
+        str(firmware_tag_info.get("commit_sha", "0000000")),
         warranty_signature,
         official_signature,
     )

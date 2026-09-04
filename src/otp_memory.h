@@ -33,6 +33,7 @@ bool readAstroNavOtpData(AstroNav_OTP_Data &data);
 bool astroNavOtpHasValidHeader();
 bool astroNavOtpGetSerialNumber(uint32_t &serial_number);
 void formatAstroNavDisplaySerial(uint32_t serial_number, char *buffer, size_t buffer_size);
+void formatAstroNavOtpInitialFirmwareVersion(const AstroNav_OTP_Data &data, char *buffer, size_t buffer_size);
 bool astroNavOtpWasProgrammedThisBoot();
 void printAstroNavOtpSummary();
 const AstroNavOtpStatus &getAstroNavOtpStatus();

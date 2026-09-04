@@ -15,6 +15,10 @@ static constexpr size_t kAstroNavOtpRowSizeBytes = 3;
 static constexpr size_t kAstroNavOtpRowCount = (sizeof(AstroNav_OTP_Data) + kAstroNavOtpRowSizeBytes - 1) / kAstroNavOtpRowSizeBytes;
 static constexpr uint32_t kAstroNavMagicHeader = 0xA57B09A2u;
 static constexpr char kSerialAlphabet[] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+static constexpr size_t kReservedProductionSecondIndex = 0;
+static constexpr size_t kReservedAheadCountIndex = 1;
+static constexpr size_t kReservedCommitStartIndex = 2;
+static constexpr size_t kReservedCommitLength = 7;
 
 AstroNav_OTP_Data cachedOtpData = {};
 AstroNavOtpStatus otpStatus = {
@@ -84,7 +88,17 @@ AstroNav_OTP_Data buildExpectedOtpData() {
   data.initial_firmware[2] = ASTRONAV_BUILD_INITIAL_FIRMWARE_PATCH;
   data.warranty_signature = ASTRONAV_BUILD_WARRANTY_SIGNATURE;
   memset(data.reserved, 0, sizeof(data.reserved));
-  data.reserved[0] = static_cast<uint8_t>(ASTRONAV_BUILD_PRODUCTION_SECOND);
+  data.reserved[kReservedProductionSecondIndex] = static_cast<uint8_t>(ASTRONAV_BUILD_PRODUCTION_SECOND);
+  data.reserved[kReservedAheadCountIndex] = static_cast<uint8_t>(ASTRONAV_BUILD_FIRMWARE_AHEAD_COUNT & 0xFF);
+
+  const char *commit = ASTRONAV_BUILD_FIRMWARE_COMMIT_SHA;
+  for (size_t index = 0; index < kReservedCommitLength && commit[index] != '\0'; index++) {
+    char ch = commit[index];
+    if (ch >= 'A' && ch <= 'F') {
+      ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    data.reserved[kReservedCommitStartIndex + index] = static_cast<uint8_t>(ch);
+  }
   return data;
 }
 
@@ -109,6 +123,38 @@ void printReservedBytes(const uint8_t *bytes, size_t length) {
     }
   }
   Serial.println();
+}
+
+bool isAsciiHexChar(char value) {
+  return (value >= '0' && value <= '9')
+      || (value >= 'a' && value <= 'f')
+      || (value >= 'A' && value <= 'F');
+}
+
+bool hasValidCommitCodeInReserved(const AstroNav_OTP_Data &data) {
+  for (size_t index = 0; index < kReservedCommitLength; index++) {
+    char value = static_cast<char>(data.reserved[kReservedCommitStartIndex + index]);
+    if (!isAsciiHexChar(value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void readCommitCodeFromReserved(const AstroNav_OTP_Data &data, char *buffer, size_t buffer_size) {
+  if (!buffer || buffer_size == 0) {
+    return;
+  }
+
+  size_t copyLen = (kReservedCommitLength < (buffer_size - 1)) ? kReservedCommitLength : (buffer_size - 1);
+  for (size_t index = 0; index < copyLen; index++) {
+    char ch = static_cast<char>(data.reserved[kReservedCommitStartIndex + index]);
+    if (ch >= 'A' && ch <= 'F') {
+      ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    buffer[index] = ch;
+  }
+  buffer[copyLen] = '\0';
 }
 
 }
@@ -179,6 +225,26 @@ void formatAstroNavDisplaySerial(uint32_t serial_number, char *buffer, size_t bu
   snprintf(buffer, buffer_size, "AN-%s", encoded);
 }
 
+void formatAstroNavOtpInitialFirmwareVersion(const AstroNav_OTP_Data &data, char *buffer, size_t buffer_size) {
+  if (!buffer || buffer_size == 0) {
+    return;
+  }
+
+  const unsigned int major = static_cast<unsigned int>(data.initial_firmware[0]);
+  const unsigned int minor = static_cast<unsigned int>(data.initial_firmware[1]);
+  const unsigned int patch = static_cast<unsigned int>(data.initial_firmware[2]);
+  const unsigned int ahead = static_cast<unsigned int>(data.reserved[kReservedAheadCountIndex]);
+
+  if (hasValidCommitCodeInReserved(data)) {
+    char commit[8] = {0};
+    readCommitCodeFromReserved(data, commit, sizeof(commit));
+    snprintf(buffer, buffer_size, "V%u.%u.%u_%u_%s", major, minor, patch, ahead, commit);
+    return;
+  }
+
+  snprintf(buffer, buffer_size, "V%u.%u.%u", major, minor, patch);
+}
+
 bool astroNavOtpWasProgrammedThisBoot() {
   return otpStatus.write_succeeded;
 }
@@ -229,9 +295,12 @@ void printAstroNavOtpSummary() {
   Serial.printf("[OTP] hardware_major=%u\n", static_cast<unsigned int>(data.hardware_major));
   Serial.printf("[OTP] hardware_minor=%u\n", static_cast<unsigned int>(data.hardware_minor));
   Serial.printf("[OTP] production_date=%s\n", data.production_date);
-  Serial.printf("[OTP] production_second=%u\n", static_cast<unsigned int>(data.reserved[0]));
-  Serial.printf("[OTP] production_timestamp=%s-%02u\n", data.production_date, static_cast<unsigned int>(data.reserved[0]));
+  Serial.printf("[OTP] production_second=%u\n", static_cast<unsigned int>(data.reserved[kReservedProductionSecondIndex]));
+  Serial.printf("[OTP] production_timestamp=%s-%02u\n", data.production_date, static_cast<unsigned int>(data.reserved[kReservedProductionSecondIndex]));
   Serial.printf("[OTP] serial_number=%s\n", displaySerial);
+  char initialFirmwareVersion[28] = {0};
+  formatAstroNavOtpInitialFirmwareVersion(data, initialFirmwareVersion, sizeof(initialFirmwareVersion));
+  Serial.printf("[OTP] first_firmware_version=%s\n", initialFirmwareVersion);
   Serial.printf("[OTP] initial_firmware=%u.%u.%u\n",
                 static_cast<unsigned int>(data.initial_firmware[0]),
                 static_cast<unsigned int>(data.initial_firmware[1]),

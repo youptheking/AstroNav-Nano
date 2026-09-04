@@ -201,6 +201,7 @@ bool settingsNeedPersist = false;
 bool missionLogFlushed = false;
 bool pyroLatched = false;
 bool missionStarted = false;
+bool flightRecordsPendingSave = false;
 
 uint32_t bootMs = 0;
 uint32_t bootPulseUntilMs = 0;
@@ -286,6 +287,7 @@ void updatePyroOutput();
 void updateFlightStateFromSamples();
 void recordFaultAndSafeStop();
 void startMissionLog();
+void finalizeFlightPersonalRecords();
 void ensureLogsDirectory();
 void handleSerialCommand(const char *command);
 void enterFlightModeFromUsb();
@@ -421,11 +423,11 @@ void buildFlashStamp(char *buffer, size_t bufferSize) {
     }
   }
 
-  snprintf(buffer, bufferSize, "%02d-%02d-%04d %s",
+  snprintf(buffer, bufferSize, "%s %02d-%02d-%04d",
+           __TIME__,
            day,
            monthIndex + 1,
-           year,
-           __TIME__);
+           year);
 }
 
 uint32_t checksumBytes(const uint8_t *data, size_t length) {
@@ -692,7 +694,7 @@ void makeDefaultDeviceProfile() {
 
 void ensureDeviceSerial() {
   uint32_t otpSerialNumber = 0;
-  if (astroNavOtpGetSerialNumber(otpSerialNumber) && otpSerialNumber != 0) {
+  if (astroNavOtpGetSerialNumber(otpSerialNumber)) {
     formatAstroNavDisplaySerial(otpSerialNumber, deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber));
     assets.Device_Key = deviceProfile.serialNumber;
     return;
@@ -834,6 +836,28 @@ void persistDeviceProfile() {
   AstroNav_OTP_Data otpData = {};
   bool otpReadable = readAstroNavOtpData(otpData);
   const AstroNavOtpStatus &otpStatus = getAstroNavOtpStatus();
+  char firstFlashStamp[32] = {0};
+  snprintf(firstFlashStamp, sizeof(firstFlashStamp), "%s", deviceProfile.flashStamp);
+  if (otpReadable && otpStatus.has_magic_header) {
+    int firstHour = 0;
+    int firstMinute = 0;
+    int firstDay = 0;
+    int firstMonth = 0;
+    int firstYear = 0;
+    if (sscanf(otpData.production_date, "%2d-%2d-%2d-%2d-%4d", &firstHour, &firstMinute, &firstDay, &firstMonth, &firstYear) == 5) {
+      snprintf(
+        firstFlashStamp,
+        sizeof(firstFlashStamp),
+        "%02d:%02d:%02u %02d-%02d-%04d",
+        firstHour,
+        firstMinute,
+        static_cast<unsigned int>(otpData.reserved[0]),
+        firstDay,
+        firstMonth,
+        firstYear
+      );
+    }
+  }
 
   updateDeviceProfileChecksum();
   File infoFile = FatFS.open(DEVICE_INFO_FILE, "w");
@@ -861,8 +885,10 @@ void persistDeviceProfile() {
   infoFile.println("[profile]");
   writeProfileFieldLine(infoFile, "MAGIC", "50455246");
   infoFile.printf("VERSION=%s\n", assets.Firmware_Version);
+  infoFile.printf("CURRENT_FIRMWARE_VERSION=%s\n", assets.Firmware_Version);
   writeProfileFieldLine(infoFile, "SERIAL_NUMBER", deviceProfile.serialNumber);
-  writeProfileFieldLine(infoFile, "FLASH_STAMP", deviceProfile.flashStamp);
+  writeProfileFieldLine(infoFile, "FLASH_STAMP", firstFlashStamp);
+  writeProfileFieldLine(infoFile, "LAST_FLASH_STAMP", deviceProfile.flashStamp);
   infoFile.printf("FLIGHT_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.flightCount));
   infoFile.printf("LOG_COUNT=%lu\n", static_cast<unsigned long>(deviceProfile.logCount));
   infoFile.print("MAX_FLIGHT_ALTITUDE_M=");
@@ -883,7 +909,9 @@ void persistDeviceProfile() {
   infoFile.printf("OTP_OFFICIAL_SIGNATURE=%s\n", otpStatus.official_signature ? "TRUE" : "FALSE");
   if (otpReadable) {
     char otpDisplaySerial[16] = {0};
+    char otpInitialFirmwareVersion[28] = {0};
     formatAstroNavDisplaySerial(otpData.serial_number, otpDisplaySerial, sizeof(otpDisplaySerial));
+    formatAstroNavOtpInitialFirmwareVersion(otpData, otpInitialFirmwareVersion, sizeof(otpInitialFirmwareVersion));
     infoFile.printf("OTP_MAGIC_HEADER=%08lX\n", static_cast<unsigned long>(otpData.magic_header));
     infoFile.printf("OTP_MANUFACTURER_ID=%s\n", otpData.manufacturer_id);
     infoFile.printf("OTP_PRODUCT_ID=%s\n", otpData.product_id);
@@ -892,12 +920,17 @@ void persistDeviceProfile() {
     infoFile.printf("OTP_PRODUCTION_DATE=%s\n", otpData.production_date);
     infoFile.printf("OTP_PRODUCTION_SECOND=%u\n", static_cast<unsigned int>(otpData.reserved[0]));
     infoFile.printf("OTP_PRODUCTION_TIMESTAMP=%s-%02u\n", otpData.production_date, static_cast<unsigned int>(otpData.reserved[0]));
+    infoFile.printf("OTP_FIRST_FIRMWARE_VERSION=%s\n", otpInitialFirmwareVersion);
     infoFile.printf("OTP_SERIAL_NUMBER=%s\n", otpDisplaySerial);
     infoFile.printf("OTP_INITIAL_FIRMWARE=%u.%u.%u\n",
                     static_cast<unsigned int>(otpData.initial_firmware[0]),
                     static_cast<unsigned int>(otpData.initial_firmware[1]),
                     static_cast<unsigned int>(otpData.initial_firmware[2]));
     infoFile.printf("OTP_WARRANTY_SIGNATURE=%08lX\n", static_cast<unsigned long>(otpData.warranty_signature));
+    infoFile.printf("CURRENT_FIRMWARE_VERSION=%s\n", assets.Firmware_Version);
+    infoFile.printf("CURRENT_FLASH_STAMP=%s\n", deviceProfile.flashStamp);
+    infoFile.printf("OTP_FIRST_FIRMWARE_MATCHES_CURRENT=%s\n",
+                    strcmp(otpInitialFirmwareVersion, assets.Firmware_Version) == 0 ? "TRUE" : "FALSE");
   }
   infoFile.println();
   UsbInfoFiles::writeDebugSection(infoFile,
@@ -994,8 +1027,27 @@ void startMissionLog() {
   apogeePeakHoldStartMs = 0;
   missionStarted = true;
   missionLogFlushed = false;
+  flightRecordsPendingSave = true;
   logCounter = 0;
+  peakFlightSpeedMps = 0.0f;
+}
+
+void finalizeFlightPersonalRecords() {
+  if (!flightRecordsPendingSave) {
+    return;
+  }
+
+  if (peakAltitude > deviceProfile.maxFlightAltitudeM) {
+    deviceProfile.maxFlightAltitudeM = peakAltitude;
+  }
+  if (peakFlightSpeedMps > deviceProfile.maxFlightSpeedMps) {
+    deviceProfile.maxFlightSpeedMps = peakFlightSpeedMps;
+  }
+
+  deviceProfile.lastFlightAltitudeM = peakAltitude;
+  deviceProfile.lastFlightSpeedMps = peakFlightSpeedMps;
   persistDeviceProfile();
+  flightRecordsPendingSave = false;
 }
 
 void appendMissionSample() {
@@ -1487,6 +1539,12 @@ void updateFlightStateFromSamples() {
   float rawVelocity = (currentAltitude - lastAltitudeForVelocity) / (SAMPLE_PERIOD_MS / 1000.0f);
   currentVerticalVelocity = (currentVerticalVelocity * 0.75f) + (rawVelocity * 0.25f);
   lastAltitudeForVelocity = currentAltitude;
+  if (missionStarted) {
+    float verticalSpeedAbs = fabsf(currentVerticalVelocity);
+    if (verticalSpeedAbs > peakFlightSpeedMps) {
+      peakFlightSpeedMps = verticalSpeedAbs;
+    }
+  }
 
   bool imuReliable = boardHealth.imuStreamOk && isfinite(accelMag) && isfinite(gravityProjection);
   bool baroReliable = boardHealth.baroOk && isfinite(currentAltitude) && isfinite(currentVerticalVelocity);
@@ -1696,6 +1754,8 @@ void setup() {
     loadOrCreateDeviceProfile();
     ensureDeviceSerial();
     syncAssetsFromDeviceProfile();
+    // Keep FLASH_STAMP aligned with the currently flashed firmware build.
+    buildFlashStamp(deviceProfile.flashStamp, sizeof(deviceProfile.flashStamp));
     persistDeviceProfile();
     settingsNeedPersist = false;
   }
@@ -1831,6 +1891,10 @@ void loop() {
 
     if (missionAtSafeGroundState() && !missionLogFlushed) {
       flushMissionLogToFlash();
+    }
+
+    if (missionAtSafeGroundState() && missionLogFlushed) {
+      finalizeFlightPersonalRecords();
     }
 
     if (now - lastLogMs >= 1000) {
