@@ -20,6 +20,58 @@ The author/maintainer assumes zero liability for:
 
 If you do not fully understand and accept these terms, do not use this product or software.
 
+By using this device, building this firmware, or compiling this code, you acknowledge that you have read and understood this documentation, the fair warnings in this project, and the applicable YoupSpace legal terms.
+
+You agree to the following:
+
+- you have read the full documentation for this project before use
+- you accept the safety warnings and risk disclosures
+- you accept the YoupSpace Terms and Conditions
+- you accept the YoupSpace Privacy Policy
+
+Relevant links:
+
+- https://youpspace.com/terms-and-conditions/
+- https://youpspace.com/privacy-policy/
+
+## Who this guide is for
+
+This guide is written for someone who is new to this kind of hardware and firmware work, but is willing to follow a careful setup process.
+
+It assumes you are comfortable with:
+
+- basic Windows usage
+- installing software
+- opening a project in VS Code
+- connecting a USB device to a PC
+- editing a text file such as Settings.ini
+
+This is not a plug-and-play consumer product. It is a technical flight-control project that must be treated with respect and safety-first thinking.
+
+## Quick chapter guide
+
+1. Safety first and project expectations
+2. Required tools and software setup
+3. Building the firmware
+4. Uploading to the board
+5. First boot and USB configuration
+6. Editing settings and understanding the config file
+7. Production metadata and optional serial/key handling
+8. Flight logic and state behavior
+9. Troubleshooting and common issues
+
+## Safety-first notes for beginners
+
+Before you build, flash, or launch anything:
+
+- double-check your wiring and power source
+- do not connect pyro or launch hardware until the board is verified
+- do not treat the firmware as a safe-to-fly system without a proper test plan
+- if you are unsure what a setting does, do not change it blindly
+- use USB mode to edit configuration before flight testing
+
+This project includes real flight logic, output control, and safety-critical behavior. Treat every change seriously.
+
 ## IDE setup (VS Code + PlatformIO)
 
 ### 1) Install PlatformIO
@@ -66,6 +118,30 @@ C:\Program Files\Git\cmd
 
 Then reload VS Code and build again.
 
+### 7) Production/build metadata (optional)
+
+This project includes an automatic build script, [generate_version.py](generate_version.py), which creates the header file in [include/build_info.h](include/build_info.h). That header contains the build version, firmware metadata, and a warranty signature.
+
+For production builds, the script can optionally use a local secrets folder:
+
+```text
+C:\Users\<your-user>\Documents\GitHub\YoupSpace_Secrets\
+```
+
+Files used when present:
+
+- warranty_key.txt
+- serial_registry.csv
+
+Behavior:
+
+- If the secret key is present and valid, the firmware generates an official warranty signature.
+- If the secret key is missing, the build still completes and logs a yellow warning, using a dummy signature instead.
+- If the serial registry CSV exists, the script can track or reserve a serial number for production uploads.
+- If the CSV is missing, the build still completes and logs a yellow warning; no serial registry enforcement is applied.
+
+This is intentionally safe for local or open-source builds: the production keys are not required for compilation, but they are used when available for real manufacturing and validation flows.
+
 ## Basic how-it-works summary
 
 At a high level, this firmware does four things:
@@ -87,7 +163,59 @@ Pyro behavior:
 
 Companion software note:
 
-This firmware is intended to work with a separate PC companion software project in another repository. That PC repo is currently not publicly available, but it is planned to be made accessible soon.
+This firmware is intended to work with AstroNav MC, the mission-control software used to configure the device, review logs, and simulate flight data. When the board is connected, the firmware exposes USB storage and settings files so the mission-control software can read, edit, and inspect the configuration and saved flight logs.
+
+The AstroNav MC workflow is designed to let users:
+
+- connect the device over USB
+- edit the live settings with an easy interface
+- read out saved log files
+- inspect previous flights and summary data
+- simulate and validate mission behavior in a more user-friendly environment
+
+The PC companion software is separate from this firmware repository and is intended to complement the board rather than replace the onboard logic.
+
+## Firmware overview: what happens first
+
+The firmware follows a simple startup and mission flow.
+
+1. Boot the board and initialize low-level hardware.
+2. Check core health, memory, SPI bus, IMU, barometer, and flash.
+3. Measure VIN and determine whether the board is powered from USB or battery.
+4. If on USB, expose the drive and allow settings editing.
+5. If not on USB, start the normal flight runtime loop.
+6. Sample sensors and estimate altitude, speed, acceleration, and state.
+7. Detect launch, boost, coast, apogee, and landing.
+8. Trigger pyro only when the logic and safety settings allow it.
+9. Keep logging the raw data and summary values.
+10. Save the mission log and persist device profile data when the flight ends.
+
+```mermaid
+flowchart TD
+    A[Power on] --> B[Initialize hardware]
+    B --> C[Run health checks]
+    C --> D{USB power?}
+    D -- Yes --> E[USB storage mode\nSettings.ini edit mode]
+    D -- No --> F[Flight mode]
+    E --> G[Safe eject / exit USB]
+    G --> F
+    F --> H[Sample IMU + barometer]
+    H --> I[Estimate altitude, speed, acceleration]
+    I --> J{Launch detected?}
+    J -- No --> H
+    J -- Yes --> K[Boost / coast logic]
+    K --> L{Apogee reached?}
+    L -- No --> H
+    L -- Yes --> M{Pyro enabled and safe to fire?}
+    M -- Yes --> N[Fire pyro]
+    M -- No --> O[Log event only]
+    N --> P[Landing confirmation]
+    O --> P
+    P --> Q[Save mission log and profile data]
+    Q --> R[System ready / idle]
+```
+
+This is the big picture: the firmware is not doing random calculations. It boots, validates itself, decides whether it is in USB config mode or flight mode, samples the rocket dynamics, and then moves through guided mission states with logging and safety checks all the way through.
 
 ## Detailed explanation
 

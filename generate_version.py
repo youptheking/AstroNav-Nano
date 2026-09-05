@@ -457,6 +457,10 @@ def append_display_serial_if_missing(display_serial):
     if normalized is None:
         raise RuntimeError(f"FATAL: Invalid display serial format: '{display_serial}'")
 
+    if not ensure_serial_registry_csv_exists():
+        print(color_text(ANSI_YELLOW, f"WARNING: Serial registry is unavailable. Skipping upload serial save for: {normalized}"))
+        return False
+
     registered_serials = load_registered_serials()
     if normalized in registered_serials["display"]:
         print(color_text(ANSI_YELLOW, f"INFO: Serial already present in {SERIAL_REGISTRY_PATH.name}. Continuing without adding: {normalized}"))
@@ -652,6 +656,10 @@ def resolve_serial_number_for_build(should_assign_serial, version, hardware_majo
 
 
 def commit_uploaded_serial_number():
+    if not ensure_serial_registry_csv_exists():
+        print(color_text(ANSI_YELLOW, "WARNING: Serial registry is unavailable. Skipping pending serial commit."))
+        return
+
     registered_serials = load_registered_serials()
     pending_record = load_pending_serial_record()
     if pending_record is None:

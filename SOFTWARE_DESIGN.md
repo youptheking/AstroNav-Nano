@@ -2,9 +2,35 @@
 
 This document describes the firmware in enough detail that the current program can be recreated from it.
 
+## Audience and scope
+
+This design guide is intended for people who want to understand what the firmware is doing, how it boots, how it validates hardware, and how the build metadata and production tooling fit into the project.
+
+This document is helpful for:
+
+- new developers joining the project
+- hardware testers validating the board
+- production teams using the optional manufacturing metadata flow
+- anyone debugging a boot, health, or flight-state issue
+
+This document is not a substitute for the actual safety procedures and launch protocol. It explains the software and hardware behavior, not the legal or operational risk decisions.
+
+## Chapter map
+
+1. Purpose and system overview
+2. Hardware assumptions and pin map
+3. Power and input-voltage detection
+4. Build-time metadata and production signing
+5. Persistent state and startup flow
+6. Hardware validation and test functions
+7. Flight-state logic and sensor behavior
+8. USB configuration and operational notes
+
 ## Purpose
 
 The firmware is a board health and wiring verification program for the AstroNav RP2350A-based PCB. It boots, initializes the board peripherals, checks the IMU and barometer, measures the board input voltage through a resistor divider on GPIO27, reports the detected power source, and keeps a status LED updated with overall board state.
+
+The project also includes a platform build step that generates build metadata and optional production signing. This is handled by [generate_version.py](generate_version.py), which writes [include/build_info.h](include/build_info.h) during compilation.
 
 The program is intentionally simple and deterministic:
 
@@ -79,6 +105,19 @@ The firmware includes:
 - Adafruit NeoPixel
 - SparkFun BMP581 Arduino Library
 - math.h
+
+## Build-time Metadata and Production Signing
+
+Before the firmware is compiled, the Python build script validates the git tag, generates the version string, and writes the header file that exposes build metadata to the firmware.
+
+Optional production metadata:
+
+- A local secrets directory is checked for a manufacturing key file: warranty_key.txt
+- A serial registry CSV is checked for serial tracking: serial_registry.csv
+- If the key or registry are absent, the build still succeeds and prints a warning instead of failing
+- If the files are present and valid, the script uses them to generate official warranty signatures and serial registration data
+
+This allows open-source or local builds to compile without the manufacturing assets, while keeping the production path intact when those files are available.
 
 ## Persistent State
 
