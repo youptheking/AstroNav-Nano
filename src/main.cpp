@@ -156,6 +156,9 @@ struct FlightSample {
   int16_t velocityCms = 0;
   int16_t rollD10 = 0;
   int16_t pitchD10 = 0;
+  int16_t estimatedApogeeDropCm = 0;
+  int16_t actualApogeeDropCm = 0;
+  int16_t apogeeDropErrorCm = 0;
   uint8_t healthBits = 0;
   uint8_t state = 0;
   uint8_t pyro = 0;
@@ -444,8 +447,18 @@ void applyFlightSettings() {
   float speedMargin = clampFloat(flightSettings.speedMarginMps, 0.0f, 1000.0f);
 
   flightLaunchThresholdG = clampFloat(flightSettings.launchThresholdG, 1.15f, 4.0f);
-  flightApogeeDropM = clampFloat((flightSettings.estimatedHeightM * 0.08f) + (heightMargin * 0.25f), 0.25f, 50.0f);
-  flightApogeeVelocityThresholdMPS = -clampFloat((flightSettings.estimatedSpeedMps * 0.05f) + (speedMargin * 0.15f), 0.25f, 12.0f);
+
+  // Keep apogee detection usable on short tosses even when the user estimate is
+  // intentionally conservative. The estimate is a tuning aid, not a hard gate that
+  // can prevent valid apogees on sub-2 m flights.
+  float estimatedDropM = (flightSettings.estimatedHeightM * 0.08f) + (heightMargin * 0.25f);
+  float shortFlightCapDropM = (flightSettings.estimatedHeightM * 0.04f) + (heightMargin * 0.12f) + 0.25f;
+  flightApogeeDropM = clampFloat(fminf(estimatedDropM, shortFlightCapDropM), 0.25f, 50.0f);
+
+  float estimatedVelocityThresholdMps = (flightSettings.estimatedSpeedMps * 0.05f) + (speedMargin * 0.15f);
+  float shortFlightCapVelocityThresholdMps = fmaxf(0.25f, flightSettings.estimatedSpeedMps * 0.10f);
+  flightApogeeVelocityThresholdMPS = -clampFloat(fminf(estimatedVelocityThresholdMps, shortFlightCapVelocityThresholdMps), 0.25f, 12.0f);
+
   flightLandingAltitudeToleranceM = clampFloat(2.0f + (heightMargin * 0.05f), 2.0f, 25.0f);
   flightLandingVelocityToleranceMPS = clampFloat(0.25f + (speedMargin * 0.05f), 0.25f, 5.0f);
 }
@@ -1075,6 +1088,10 @@ void appendMissionSample() {
   sample.velocityCms = static_cast<int16_t>(lroundf(clampFloat(currentVerticalVelocity * 100.0f, -32768.0f, 32767.0f)));
   sample.rollD10 = static_cast<int16_t>(lroundf(clampFloat(currentRollDeg * 10.0f, -32768.0f, 32767.0f)));
   sample.pitchD10 = static_cast<int16_t>(lroundf(clampFloat(currentPitchDeg * 10.0f, -32768.0f, 32767.0f)));
+  float actualApogeeDropM = fmaxf(0.0f, peakAltitude - currentAltitude);
+  sample.estimatedApogeeDropCm = static_cast<int16_t>(lroundf(clampFloat(flightApogeeDropM * 100.0f, -32768.0f, 32767.0f)));
+  sample.actualApogeeDropCm = static_cast<int16_t>(lroundf(clampFloat(actualApogeeDropM * 100.0f, -32768.0f, 32767.0f)));
+  sample.apogeeDropErrorCm = static_cast<int16_t>(lroundf(clampFloat((actualApogeeDropM - flightApogeeDropM) * 100.0f, -32768.0f, 32767.0f)));
   sample.healthBits = healthBits();
   sample.state = static_cast<uint8_t>(flightState);
   sample.pyro = pyroLatched ? 1u : 0u;
@@ -1322,8 +1339,8 @@ void flushMissionLogToFlash() {
   logFile.printf("# Flight Number: %lu\n", static_cast<unsigned long>(currentFlightNumber));
   logFile.printf("# Boot Time Ms: %lu\n", static_cast<unsigned long>(bootMs));
   logFile.printf("# Samples: %u\n", missionLogCount);
-  logFile.println("# Columns: counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;health_bits");
-  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;health_bits");
+  logFile.println("# Columns: counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
+  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
   for (uint16_t i = 0; i < missionLogCount; i++) {
     const FlightSample &sample = missionLog[i];
     logFile.print(static_cast<unsigned long>(sample.counter));
@@ -1359,6 +1376,12 @@ void flushMissionLogToFlash() {
     logFile.print(sample.rollD10 / 10.0f, 1);
     logFile.print(';');
     logFile.print(sample.pitchD10 / 10.0f, 1);
+    logFile.print(';');
+    logFile.print(sample.estimatedApogeeDropCm / 100.0f, 2);
+    logFile.print(';');
+    logFile.print(sample.actualApogeeDropCm / 100.0f, 2);
+    logFile.print(';');
+    logFile.print(sample.apogeeDropErrorCm / 100.0f, 2);
     logFile.print(';');
     logFile.println(static_cast<unsigned>(sample.healthBits));
   }
@@ -1602,13 +1625,18 @@ void updateFlightStateFromSamples() {
 
     bool apogeeCandidate = false;
     if (baroReliable) {
-      apogeeCandidate = (peakAltitude - currentAltitude) >= flightApogeeDropM &&
-                       currentVerticalVelocity <= flightApogeeVelocityThresholdMPS &&
+      float altitudeDropFromPeakM = peakAltitude - currentAltitude;
+      bool actualPeakDescent = altitudeDropFromPeakM >= 0.05f && currentVerticalVelocity <= 0.0f;
+      bool nearEstimatedThreshold = altitudeDropFromPeakM >= flightApogeeDropM;
+      bool descentConfidence = actualPeakDescent &&
+                               ((nearEstimatedThreshold && currentVerticalVelocity <= flightApogeeVelocityThresholdMPS) ||
+                                currentVerticalVelocity <= 0.0f);
+      apogeeCandidate = descentConfidence &&
                        (imuReliable ? (accelMag <= APOGEE_ACCEL_MAX_G) : true) &&
                        (millis() - launchMs) >= LAUNCH_MIN_TIME_MS;
     } else if (imuReliable && flightFallbackAllowed) {
       apogeeCandidate = (accelMag <= APOGEE_ACCEL_MAX_G) &&
-                       currentVerticalVelocity <= flightApogeeVelocityThresholdMPS &&
+                       currentVerticalVelocity <= 0.0f &&
                        (millis() - launchMs) >= LAUNCH_MIN_TIME_MS;
     }
 
