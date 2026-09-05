@@ -152,6 +152,7 @@ struct FlightSample {
   int16_t gzDps10 = 0;
   int16_t tempCd10 = 0;
   uint16_t pressureHd10 = 0;
+  int16_t batteryVoltageMv = 0;
   int16_t altitudeCm = 0;
   int16_t velocityCms = 0;
   int16_t rollD10 = 0;
@@ -1098,6 +1099,7 @@ void appendMissionSample() {
   sample.gzDps10 = static_cast<int16_t>(lroundf((currentGz - gyroBiasZ) * 10.0f));
   sample.tempCd10 = static_cast<int16_t>(lroundf(currentTemperature * 10.0f));
   sample.pressureHd10 = static_cast<uint16_t>(lroundf(clampFloat(currentPressure * 10.0f, 0.0f, 65535.0f)));
+  sample.batteryVoltageMv = static_cast<int16_t>(lroundf(clampFloat(currentVinVoltage * 1000.0f, -32768.0f, 32767.0f)));
   sample.altitudeCm = static_cast<int16_t>(lroundf(clampFloat(currentAltitude * 100.0f, -32768.0f, 32767.0f)));
   sample.velocityCms = static_cast<int16_t>(lroundf(clampFloat(currentVerticalVelocity * 100.0f, -32768.0f, 32767.0f)));
   sample.rollD10 = static_cast<int16_t>(lroundf(clampFloat(currentRollDeg * 10.0f, -32768.0f, 32767.0f)));
@@ -1354,6 +1356,43 @@ void flushMissionLogToFlash() {
     return;
   }
 
+  float maxAltitudeM = 0.0f;
+  float maxSpeedMps = 0.0f;
+  float maxAccelG = 0.0f;
+  float maxBatteryVoltageV = 0.0f;
+  float maxBatteryVoltageSeenV = 0.0f;
+  for (uint16_t i = 0; i < missionLogCount; i++) {
+    const FlightSample &sample = missionLog[i];
+
+    float altitudeM = sample.altitudeCm / 100.0f;
+    if (altitudeM > maxAltitudeM) {
+      maxAltitudeM = altitudeM;
+    }
+
+    float velocityMps = fabsf(sample.velocityCms / 100.0f);
+    if (velocityMps > maxSpeedMps) {
+      maxSpeedMps = velocityMps;
+    }
+
+    float axG = sample.axMg / 1000.0f;
+    float ayG = sample.ayMg / 1000.0f;
+    float azG = sample.azMg / 1000.0f;
+    float accelMagG = sqrtf((axG * axG) + (ayG * ayG) + (azG * azG));
+    if (accelMagG > maxAccelG) {
+      maxAccelG = accelMagG;
+    }
+
+    float batteryVoltageV = sample.batteryVoltageMv / 1000.0f;
+    if (batteryVoltageV > maxBatteryVoltageSeenV) {
+      maxBatteryVoltageSeenV = batteryVoltageV;
+    }
+  }
+
+  maxBatteryVoltageV = maxBatteryVoltageSeenV;
+  peakAltitude = maxAltitudeM;
+  peakFlightSpeedMps = maxSpeedMps;
+  peakAccelMagG = maxAccelG;
+
   ensureLogsDirectory();
   File logFile = FatFS.open(missionLogPath, "w");
   if (!logFile) {
@@ -1365,14 +1404,15 @@ void flushMissionLogToFlash() {
   logFile.printf("# Flight Number: %lu\n", static_cast<unsigned long>(currentFlightNumber));
   logFile.printf("# Boot Time Ms: %lu\n", static_cast<unsigned long>(bootMs));
   logFile.printf("# Samples: %u\n", missionLogCount);
-  logFile.printf("# MAX_ALTITUDE_M=%.2f\n", peakAltitude);
-  logFile.printf("# MAX_SPEED_MPS=%.2f\n", peakFlightSpeedMps);
-  logFile.printf("# MAX_ACCEL_G=%.2f\n", peakAccelMagG);
+  logFile.printf("# MAX_ALTITUDE_M=%.2f\n", maxAltitudeM);
+  logFile.printf("# MAX_SPEED_MPS=%.2f\n", maxSpeedMps);
+  logFile.printf("# MAX_ACCEL_G=%.2f\n", maxAccelG);
+  logFile.printf("# MAX_BATTERY_V=%.2f\n", maxBatteryVoltageV);
   logFile.printf("# ESTIMATED_APOGEE_DROP_M=%.2f\n", flightApogeeDropM);
-  logFile.printf("# ACTUAL_APOGEE_DROP_M=%.2f\n", fmaxf(0.0f, peakAltitude - currentAltitude));
-  logFile.printf("# APOGEE_DROP_ERROR_M=%.2f\n", fmaxf(0.0f, peakAltitude - currentAltitude) - flightApogeeDropM);
-  //logFile.println("# Columns: counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
-  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
+  logFile.printf("# ACTUAL_APOGEE_DROP_M=%.2f\n", fmaxf(0.0f, maxAltitudeM - currentAltitude));
+  logFile.printf("# APOGEE_DROP_ERROR_M=%.2f\n", fmaxf(0.0f, maxAltitudeM - currentAltitude) - flightApogeeDropM);
+  //logFile.println("# Columns: counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;battery_v;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
+  logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;battery_v;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
   for (uint16_t i = 0; i < missionLogCount; i++) {
     const FlightSample &sample = missionLog[i];
     logFile.print(static_cast<unsigned long>(sample.counter));
@@ -1400,6 +1440,8 @@ void flushMissionLogToFlash() {
     logFile.print(sample.tempCd10 / 10.0f, 1);
     logFile.print(';');
     logFile.print(sample.pressureHd10 / 10.0f, 2);
+    logFile.print(';');
+    logFile.print(sample.batteryVoltageMv / 1000.0f, 2);
     logFile.print(';');
     logFile.print(sample.altitudeCm / 100.0f, 2);
     logFile.print(';');
