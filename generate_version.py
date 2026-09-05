@@ -390,30 +390,22 @@ def normalize_display_serial_text(value_text):
 
 def ensure_serial_registry_csv_exists():
     if not SECRETS_ROOT.exists():
-        raise RuntimeError(f"FATAL: Required secrets folder not found: {SECRETS_ROOT}")
+        print(color_text(ANSI_YELLOW, f"WARNING: Serial registry folder not found. Skipping serial registry checks for this build: {SECRETS_ROOT}"))
+        return False
 
     if SERIAL_REGISTRY_CSV_PATH.exists():
-        return
+        return True
 
-    legacy_entries = []
-    if LEGACY_SERIAL_REGISTRY_PATH.exists():
-        for line in LEGACY_SERIAL_REGISTRY_PATH.read_text(encoding="ascii").splitlines():
-            stripped = line.strip()
-            if stripped:
-                legacy_entries.append(stripped)
-
-    with SERIAL_REGISTRY_CSV_PATH.open("w", encoding="ascii", newline="") as registry_file:
-        writer = csv.writer(registry_file)
-        writer.writerow(["serial_number"])
-        for value in legacy_entries:
-            writer.writerow([value])
-
-    if legacy_entries:
-        print(color_text(ANSI_CYAN, f"INFO: Migrated {len(legacy_entries)} serial entries from {LEGACY_SERIAL_REGISTRY_PATH.name} to {SERIAL_REGISTRY_CSV_PATH.name}."))
+    print(color_text(ANSI_YELLOW, f"WARNING: Serial registry CSV not found. Skipping serial registry checks for this build: {SERIAL_REGISTRY_CSV_PATH}"))
+    return False
 
 
 def load_registered_serials():
-    ensure_serial_registry_csv_exists()
+    if not ensure_serial_registry_csv_exists():
+        return {
+            "numeric": set(),
+            "display": set(),
+        }
 
     serials = {
         "numeric": set(),
