@@ -48,6 +48,7 @@ extern void flushMissionLogToFlash();
 extern void startMissionLog();
 extern void appendMissionSample();
 extern void recordFaultAndSafeStop();
+extern bool pyroFireAtApogeeAllowed;
 extern float clampFloat(float value, float minimum, float maximum);
 extern float altitudeFromPressure(float pressureHpa);
 extern bool missionAtSafeGroundState();
@@ -332,6 +333,11 @@ bool calibratePadOrientation() {
 
 void firePyro() {
   if (pyroLatched) {
+    return;
+  }
+
+  if (!pyroFireAtApogeeAllowed) {
+    Serial.println("[PYRO] Blocked: FIRE_PYRO_APOGEE=FALSE in Settings.ini");
     return;
   }
 

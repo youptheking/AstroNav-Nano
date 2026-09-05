@@ -253,12 +253,14 @@ uint8_t apogeePeakHoldCount = 0;
 uint32_t apogeePeakHoldStartMs = 0;
 uint32_t logCounter = 0;
 float peakFlightSpeedMps = 0.0f;
+float peakAccelMagG = 0.0f;
 
 float flightLaunchThresholdG = 1.35f;
 float flightApogeeDropM = 0.25f;
 float flightApogeeVelocityThresholdMPS = -0.25f;
 float flightLandingAltitudeToleranceM = 2.0f;
 float flightLandingVelocityToleranceMPS = 0.25f;
+bool pyroFireAtApogeeAllowed = true;
 
 FlightSettings flightSettings;
 DeviceProfile deviceProfile;
@@ -447,6 +449,7 @@ void applyFlightSettings() {
   float speedMargin = clampFloat(flightSettings.speedMarginMps, 0.0f, 1000.0f);
 
   flightLaunchThresholdG = clampFloat(flightSettings.launchThresholdG, 1.15f, 4.0f);
+  pyroFireAtApogeeAllowed = flightSettings.firePyroAtApogee;
 
   // Keep apogee detection usable on short tosses even when the user estimate is
   // intentionally conservative. The estimate is a tuning aid, not a hard gate that
@@ -1023,9 +1026,9 @@ uint8_t healthBits() {
 }
 
 void startMissionLog() {
-  uint32_t countedLogs = countAndCleanFlightLogs();
+  uint32_t highestExistingFlightNumber = countAndCleanFlightLogs();
   uint32_t persistedFlightCount = deviceProfile.flightCount;
-  currentFlightNumber = (countedLogs > persistedFlightCount ? countedLogs : persistedFlightCount) + 1u;
+  currentFlightNumber = (highestExistingFlightNumber > persistedFlightCount ? highestExistingFlightNumber : persistedFlightCount) + 1u;
   deviceProfile.flightCount = currentFlightNumber;
   assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
   snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(currentFlightNumber));
@@ -1043,6 +1046,7 @@ void startMissionLog() {
   flightRecordsPendingSave = true;
   logCounter = 0;
   peakFlightSpeedMps = 0.0f;
+  peakAccelMagG = 0.0f;
 }
 
 void finalizeFlightPersonalRecords() {
@@ -1115,6 +1119,7 @@ uint32_t countAndCleanFlightLogs() {
   }
 
   uint32_t flightLogCount = 0;
+  uint32_t highestFlightNumber = 0;
   File entry = logsDirectory.openNextFile();
   while (entry) {
     String entryName = entry.name();
@@ -1130,17 +1135,28 @@ uint32_t countAndCleanFlightLogs() {
       }
     }
 
-    entry.close();
     if (validFlightLog) {
+      char numberBuffer[9] = {0};
+      strncpy(numberBuffer, entryName.c_str() + 7, 8);
+      uint32_t flightNumber = static_cast<uint32_t>(strtoul(numberBuffer, nullptr, 10));
+      if (flightNumber > highestFlightNumber) {
+        highestFlightNumber = flightNumber;
+      }
       flightLogCount++;
     } else {
       FatFS.remove(entryName.c_str());
     }
+
+    entry.close();
     entry = logsDirectory.openNextFile();
   }
 
   logsDirectory.close();
-  return flightLogCount;
+  if (flightLogCount == 0) {
+    return 0;
+  }
+
+  return highestFlightNumber;
 }
 
 void cleanupLegacyUsbFiles() {
@@ -1339,7 +1355,13 @@ void flushMissionLogToFlash() {
   logFile.printf("# Flight Number: %lu\n", static_cast<unsigned long>(currentFlightNumber));
   logFile.printf("# Boot Time Ms: %lu\n", static_cast<unsigned long>(bootMs));
   logFile.printf("# Samples: %u\n", missionLogCount);
-  logFile.println("# Columns: counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
+  logFile.printf("# MAX_ALTITUDE_M=%.2f\n", peakAltitude);
+  logFile.printf("# MAX_SPEED_MPS=%.2f\n", peakFlightSpeedMps);
+  logFile.printf("# MAX_ACCEL_G=%.2f\n", peakAccelMagG);
+  logFile.printf("# ESTIMATED_APOGEE_DROP_M=%.2f\n", flightApogeeDropM);
+  logFile.printf("# ACTUAL_APOGEE_DROP_M=%.2f\n", fmaxf(0.0f, peakAltitude - currentAltitude));
+  logFile.printf("# APOGEE_DROP_ERROR_M=%.2f\n", fmaxf(0.0f, peakAltitude - currentAltitude) - flightApogeeDropM);
+  //logFile.println("# Columns: counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
   logFile.println("counter;ms;state;power;pyro;ax_g;ay_g;az_g;gx_dps;gy_dps;gz_dps;temp_c;pressure_hpa;altitude_m;vertical_velocity_mps;roll_deg;pitch_deg;estimated_apogee_drop_m;actual_apogee_drop_m;apogee_drop_error_m;health_bits");
   for (uint16_t i = 0; i < missionLogCount; i++) {
     const FlightSample &sample = missionLog[i];
@@ -1570,6 +1592,9 @@ void updateFlightStateFromSamples() {
   }
 
   bool imuReliable = boardHealth.imuStreamOk && isfinite(accelMag) && isfinite(gravityProjection);
+  if (imuReliable && accelMag > peakAccelMagG) {
+    peakAccelMagG = accelMag;
+  }
   bool baroReliable = boardHealth.baroOk && isfinite(currentAltitude) && isfinite(currentVerticalVelocity);
   bool flightFallbackAllowed = (flightState == FlightState::Boost || flightState == FlightState::Coast || flightState == FlightState::PyroFired);
 
