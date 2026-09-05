@@ -1027,11 +1027,21 @@ uint8_t healthBits() {
 
 void startMissionLog() {
   uint32_t highestExistingFlightNumber = countAndCleanFlightLogs();
-  uint32_t persistedFlightCount = deviceProfile.flightCount;
-  currentFlightNumber = (highestExistingFlightNumber > persistedFlightCount ? highestExistingFlightNumber : persistedFlightCount) + 1u;
+  uint32_t candidateFlightNumber = (highestExistingFlightNumber == 0u) ? 1u : (highestExistingFlightNumber + 1u);
+
+  for (;;) {
+    snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(candidateFlightNumber));
+    if (!FatFS.exists(missionLogPath)) {
+      break;
+    }
+    candidateFlightNumber++;
+  }
+
+  currentFlightNumber = candidateFlightNumber;
   deviceProfile.flightCount = currentFlightNumber;
   assets.TotalFlights = static_cast<uint16_t>(deviceProfile.flightCount > UINT16_MAX ? UINT16_MAX : deviceProfile.flightCount);
-  snprintf(missionLogPath, sizeof(missionLogPath), "/logs/Flight_%08lu.csv", static_cast<unsigned long>(currentFlightNumber));
+  Serial.printf("[LOG] Starting mission file: %s\n", missionLogPath);
+  persistDeviceProfile();
   missionLogCount = 0;
   peakAltitude = 0.0f;
   lastAltitudeForVelocity = 0.0f;
