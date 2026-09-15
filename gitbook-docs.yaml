@@ -31,13 +31,14 @@ site:
             directory: ./documentation
     - type: section
       key: section-6
-      title: Copy of Documentation
-      path: copy-of-documentation
+      title: Safety warning
+      path: safety-warning
+      description: ""
       icon: book-blank
       children:
         - type: space
           key: space-6
-          title: Copy of Documentation
+          title: Safety warning
           path: copy-of-documentation
           default: true
           draft: true
