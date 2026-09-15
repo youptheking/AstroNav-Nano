@@ -31,8 +31,8 @@ site:
             directory: ./documentation
     - type: section
       key: section-6
-      title: Safety warning
-      path: safety-warning
+      title: Health & Risks
+      path: health-risks
       description: ""
       icon: book-blank
       children:
