@@ -37,17 +37,10 @@ site:
       icon: book-blank
       children:
         - type: space
-          key: space-6
-          title: Safety warning
-          path: copy-of-documentation
-          default: true
-          draft: true
-          content:
-            directory: ./copy-of-documentation
-        - type: space
           key: space-3
           title: Safety warnings
           path: help-center
+          default: true
           draft: true
           content:
             directory: ./safety-warning/help-center
