@@ -44,6 +44,13 @@ site:
           draft: true
           content:
             directory: ./copy-of-documentation
+        - type: space
+          key: space-3
+          title: Safety warnings
+          path: help-center
+          draft: true
+          content:
+            directory: ./safety-warning/help-center
     - type: section
       key: section-4
       title: Changelog
