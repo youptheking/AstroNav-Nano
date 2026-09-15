@@ -41,7 +41,6 @@ site:
           title: Safety warnings
           path: help-center
           default: true
-          draft: true
           content:
             directory: ./safety-warning/help-center
     - type: section
