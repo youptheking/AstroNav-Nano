@@ -156,13 +156,6 @@ bool isOtpBlank(const AstroNav_OTP_Data &data) {
 
 bool isValidOtpPayload(const AstroNav_OTP_Data &data) {
   const uint8_t *reserved = data.reserved;
-  bool legacyReserved = true;
-  for (size_t index = 1; index < sizeof(data.reserved); index++) {
-    if (reserved[index] != 0) {
-      legacyReserved = false;
-      break;
-    }
-  }
   return data.magic_header == kAstroNavMagicHeader &&
          memcmp(data.manufacturer_id, "YOUPSPACE\0", sizeof(data.manufacturer_id)) == 0 &&
          memcmp(data.product_id, "NANO\0", sizeof(data.product_id)) == 0 &&
@@ -171,7 +164,7 @@ bool isValidOtpPayload(const AstroNav_OTP_Data &data) {
          data.production_date[sizeof(data.production_date) - 1] == '\0' &&
          data.serial_number != 0 &&
          data.warranty_signature != 0 &&
-         (legacyReserved || hasValidCommitCodeInReserved(data)) &&
+         hasValidCommitCodeInReserved(data) &&
          reserved[9] == 0 && reserved[10] == 0 && reserved[11] == 0 &&
          reserved[12] == 0 && reserved[13] == 0 && reserved[14] == 0 && reserved[15] == 0;
 }
