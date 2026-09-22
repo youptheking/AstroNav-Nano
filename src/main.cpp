@@ -1000,7 +1000,7 @@ float clampFloat(float value, float minimum, float maximum) {
 }
 
 PowerMode classifyPowerSource(float voltage) {
-  if (voltage >= 4.5f && voltage <= 5.5f) {
+  if (voltage >= 4.4f && voltage <= 5.5f) {
     return PowerMode::USB;
   }
   if (voltage >= 3.0f && voltage <= 4.35f) {
@@ -1403,6 +1403,28 @@ void handleSerialCommand(const char *command) {
 
   if (strcmp(upperCommand, "DUMP_OTP") == 0) {
     printAstroNavOtpSummary();
+    return;
+  }
+
+  if (strcmp(upperCommand, "DUMP_HEALTH") == 0) {
+    Serial.printf("[HEALTH] healthy=%s state=%s power=%s vin_mv=%ld warning=%s critical=%s bits=%u\n",
+                  systemHealthy() ? "YES" : "NO",
+                  stateText(flightState),
+                  powerModeText(powerMode),
+                  static_cast<long>(lroundf(currentVinVoltage * 1000.0f)),
+                  boardHealth.warning ? "YES" : "NO",
+                  boardHealth.critical ? "YES" : "NO",
+                  static_cast<unsigned int>(healthBits()));
+    Serial.printf("[HEALTH] core=%s heap=%s spi=%s imu_whoami=%s imu_config=%s imu_stream=%s baro=%s flash=%s vin=%s\n",
+                  boardHealth.coreTickOk ? "OK" : "FAIL",
+                  boardHealth.heapOk ? "OK" : "FAIL",
+                  boardHealth.spiOk ? "OK" : "FAIL",
+                  boardHealth.imuWhoAmIOk ? "OK" : "FAIL",
+                  boardHealth.imuConfigOk ? "OK" : "FAIL",
+                  boardHealth.imuStreamOk ? "OK" : "FAIL",
+                  boardHealth.baroOk ? "OK" : "FAIL",
+                  boardHealth.flashFsOk ? "OK" : "FAIL",
+                  boardHealth.vinOk ? "OK" : "FAIL");
     return;
   }
 

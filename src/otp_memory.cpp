@@ -144,6 +144,15 @@ bool hasValidCommitCodeInReserved(const AstroNav_OTP_Data &data) {
   return true;
 }
 
+bool hasLegacyReservedLayout(const AstroNav_OTP_Data &data) {
+  for (size_t index = 1; index < sizeof(data.reserved); index++) {
+    if (data.reserved[index] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool isOtpBlank(const AstroNav_OTP_Data &data) {
   const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&data);
   for (size_t index = 0; index < sizeof(data); index++) {
@@ -155,7 +164,6 @@ bool isOtpBlank(const AstroNav_OTP_Data &data) {
 }
 
 bool isValidOtpPayload(const AstroNav_OTP_Data &data) {
-  const uint8_t *reserved = data.reserved;
   return data.magic_header == kAstroNavMagicHeader &&
          memcmp(data.manufacturer_id, "YOUPSPACE\0", sizeof(data.manufacturer_id)) == 0 &&
          memcmp(data.product_id, "NANO\0", sizeof(data.product_id)) == 0 &&
@@ -164,9 +172,11 @@ bool isValidOtpPayload(const AstroNav_OTP_Data &data) {
          data.production_date[sizeof(data.production_date) - 1] == '\0' &&
          data.serial_number != 0 &&
          data.warranty_signature != 0 &&
-         hasValidCommitCodeInReserved(data) &&
-         reserved[9] == 0 && reserved[10] == 0 && reserved[11] == 0 &&
-         reserved[12] == 0 && reserved[13] == 0 && reserved[14] == 0 && reserved[15] == 0;
+         (hasLegacyReservedLayout(data) ||
+          (hasValidCommitCodeInReserved(data) && data.reserved[9] == 0 &&
+           data.reserved[10] == 0 && data.reserved[11] == 0 &&
+           data.reserved[12] == 0 && data.reserved[13] == 0 &&
+           data.reserved[14] == 0 && data.reserved[15] == 0));
 }
 
 void readCommitCodeFromReserved(const AstroNav_OTP_Data &data, char *buffer, size_t buffer_size) {
@@ -268,7 +278,7 @@ void formatAstroNavOtpInitialFirmwareVersion(const AstroNav_OTP_Data &data, char
   const unsigned int patch = static_cast<unsigned int>(data.initial_firmware[2]);
   const unsigned int ahead = static_cast<unsigned int>(data.reserved[kReservedAheadCountIndex]);
 
-  if (hasValidCommitCodeInReserved(data)) {
+  if (!hasLegacyReservedLayout(data) && hasValidCommitCodeInReserved(data)) {
     char commit[8] = {0};
     readCommitCodeFromReserved(data, commit, sizeof(commit));
     snprintf(buffer, buffer_size, "V%u.%u.%u_%u_%s", major, minor, patch, ahead, commit);
