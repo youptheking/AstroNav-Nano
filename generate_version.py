@@ -58,6 +58,7 @@ UPLOAD_STATUS = {
     "track_serial": False,
     "upload_port": "",
     "otp_preflight": None,
+    "otp_preflight_bypass": False,
 }
 
 SEMANTIC_TAG_PATTERN = re.compile(r"^(?:firmware[-_])?v?(\d+)\.(\d+)\.(\d+)$")
@@ -349,6 +350,10 @@ def parse_bool_env(var_name):
     if value is None:
         return False
     return value.strip().lower() in TRUE_ENV_VALUES
+
+
+def parse_bool_value(value):
+    return str(value).strip().lower() in TRUE_ENV_VALUES
 
 
 def enable_windows_virtual_terminal():
@@ -881,6 +886,9 @@ def register_platformio_upload_hook(platformio_env):
 
     UPLOAD_STATUS["requested"] = any(target == "upload" for target in COMMAND_LINE_TARGETS)
     UPLOAD_STATUS["upload_port"] = resolve_upload_port(platformio_env)
+    UPLOAD_STATUS["otp_preflight_bypass"] = parse_bool_value(
+        get_platformio_option(platformio_env, "custom_otp_preflight_bypass", "false")
+    )
 
 
 def finalize_upload_status():
@@ -939,9 +947,15 @@ def main(cli_args):
 
     if UPLOAD_STATUS["requested"]:
         is_new_board_armed = parse_bool_env("ASTRONAV_NEW_BOARD")
-        otp_preflight = read_otp_preflight_from_device(UPLOAD_STATUS["upload_port"])
+        otp_preflight = None
+        if UPLOAD_STATUS["otp_preflight_bypass"]:
+            print(color_text(ANSI_YELLOW, "WARNING: OTP preflight bypass enabled for recovery upload. Existing OTP will be preserved; automatic provisioning is disabled."))
+        else:
+            otp_preflight = read_otp_preflight_from_device(UPLOAD_STATUS["upload_port"])
         UPLOAD_STATUS["otp_preflight"] = otp_preflight
-        if otp_preflight is None:
+        if UPLOAD_STATUS["otp_preflight_bypass"]:
+            is_new_board_armed = False
+        elif otp_preflight is None:
             if not is_new_board_armed:
                 raise RuntimeError("FATAL: Unable to read device OTP before upload. Set ASTRONAV_NEW_BOARD=1 only when intentionally provisioning a new board.")
             print(color_text(ANSI_YELLOW, "WARNING: OTP preflight unavailable; explicit new-board override is active."))
@@ -960,13 +974,15 @@ def main(cli_args):
                 and otp_preflight.get("serial") is not None
                 and (legacy_layout or metadata_layout)
             )
-        if not otp_preflight.get("blank") and existing_identity:
-            is_new_board_armed = False
-            print(color_text(ANSI_CYAN, "INFO: Existing valid OTP detected. Preserving device identity."))
-        elif not otp_preflight.get("blank"):
-            raise RuntimeError("FATAL: Device OTP is nonblank but invalid. Upload stopped; OTP will not be rewritten.")
+            if existing_identity:
+                is_new_board_armed = False
+                print(color_text(ANSI_CYAN, "INFO: Existing valid OTP detected. Preserving device identity."))
+            else:
+                raise RuntimeError("FATAL: Device OTP is nonblank but invalid. Upload stopped; OTP will not be rewritten.")
 
-        has_pending = has_reusable_pending_serial(version, hardware_major, hardware_minor, initial_firmware, key_mode)
+        has_pending = False if UPLOAD_STATUS["otp_preflight_bypass"] else has_reusable_pending_serial(
+            version, hardware_major, hardware_minor, initial_firmware, key_mode
+        )
         UPLOAD_STATUS["track_serial"] = is_new_board_armed or has_pending
 
     production_date, production_second, serial_number = resolve_serial_number_for_build(
