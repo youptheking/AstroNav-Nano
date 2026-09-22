@@ -49,6 +49,7 @@ extern void startMissionLog();
 extern void appendMissionSample();
 extern void recordFaultAndSafeStop();
 extern bool pyroFireAtApogeeAllowed;
+extern bool missionStarted;
 extern float clampFloat(float value, float minimum, float maximum);
 extern float altitudeFromPressure(float pressureHpa);
 extern bool missionAtSafeGroundState();
@@ -67,7 +68,6 @@ static constexpr uint8_t CALIBRATION_GOOD_SAMPLES = 20;
 static constexpr float STATIONARY_ACCEL_TOLERANCE_G = 0.08f;
 static constexpr float STATIONARY_GYRO_TOLERANCE_DPS = 20.0f;
 static constexpr uint32_t PYRO_PULSE_MS = 1000;
-static constexpr uint32_t MAX_FLIGHT_TIME_MS = 45000;
 
 bool testCoreTick() {
   uint32_t start = millis();
@@ -336,8 +336,8 @@ void firePyro() {
     return;
   }
 
-  if (!pyroFireAtApogeeAllowed) {
-    Serial.println("[PYRO] Blocked: FIRE_PYRO_APOGEE=FALSE in Settings.ini");
+  if (!missionStarted || (flightState != FlightState::Boost && flightState != FlightState::Coast)) {
+    Serial.println("[PYRO] Blocked: confirmed liftoff and active flight phase required.");
     return;
   }
 

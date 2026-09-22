@@ -18,9 +18,12 @@ struct __attribute__((packed)) AstroNav_OTP_Data {
 
 struct AstroNavOtpStatus {
   bool read_ok;
+  bool blank;
+  bool payload_valid;
   bool has_magic_header;
   bool write_attempted;
   bool write_succeeded;
+  bool write_blocked;
   bool signature_matches_build;
   bool official_signature;
   int last_error;

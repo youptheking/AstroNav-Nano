@@ -27,6 +27,9 @@ AstroNavOtpStatus otpStatus = {
   false,
   false,
   false,
+  false,
+  false,
+  false,
   ASTRONAV_BUILD_WARRANTY_SIGNATURE_OFFICIAL != 0,
   BOOTROM_OK,
 };
@@ -141,6 +144,31 @@ bool hasValidCommitCodeInReserved(const AstroNav_OTP_Data &data) {
   return true;
 }
 
+bool isOtpBlank(const AstroNav_OTP_Data &data) {
+  const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&data);
+  for (size_t index = 0; index < sizeof(data); index++) {
+    if (bytes[index] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool isValidOtpPayload(const AstroNav_OTP_Data &data) {
+  const uint8_t *reserved = data.reserved;
+  return data.magic_header == kAstroNavMagicHeader &&
+         memcmp(data.manufacturer_id, "YOUPSPACE\0", sizeof(data.manufacturer_id)) == 0 &&
+         memcmp(data.product_id, "NANO\0", sizeof(data.product_id)) == 0 &&
+         data.hardware_major == ASTRONAV_BUILD_HARDWARE_MAJOR &&
+         data.hardware_minor == ASTRONAV_BUILD_HARDWARE_MINOR &&
+         data.production_date[sizeof(data.production_date) - 1] == '\0' &&
+         data.serial_number != 0 &&
+         data.warranty_signature != 0 &&
+         hasValidCommitCodeInReserved(data) &&
+         reserved[9] == 0 && reserved[10] == 0 && reserved[11] == 0 &&
+         reserved[12] == 0 && reserved[13] == 0 && reserved[14] == 0 && reserved[15] == 0;
+}
+
 void readCommitCodeFromReserved(const AstroNav_OTP_Data &data, char *buffer, size_t buffer_size) {
   if (!buffer || buffer_size == 0) {
     return;
@@ -164,6 +192,9 @@ bool readAstroNavOtpData(AstroNav_OTP_Data &data) {
   int errorCode = BOOTROM_OK;
   if (!accessOtpRows(rows, false, errorCode)) {
     otpStatus.read_ok = false;
+    otpStatus.blank = false;
+    otpStatus.payload_valid = false;
+    otpStatus.write_blocked = true;
     otpStatus.has_magic_header = false;
     otpStatus.last_error = errorCode;
     return false;
@@ -172,7 +203,9 @@ bool readAstroNavOtpData(AstroNav_OTP_Data &data) {
   unpackOtpRows(rows, data);
   cachedOtpData = data;
   otpStatus.read_ok = true;
+  otpStatus.blank = isOtpBlank(data);
   otpStatus.has_magic_header = data.magic_header == kAstroNavMagicHeader;
+  otpStatus.payload_valid = isValidOtpPayload(data);
   otpStatus.signature_matches_build = otpStatus.has_magic_header && data.warranty_signature == ASTRONAV_BUILD_WARRANTY_SIGNATURE;
   otpStatus.last_error = BOOTROM_OK;
   return true;
@@ -180,12 +213,12 @@ bool readAstroNavOtpData(AstroNav_OTP_Data &data) {
 
 bool astroNavOtpHasValidHeader() {
   AstroNav_OTP_Data data = {};
-  return readAstroNavOtpData(data) && data.magic_header == kAstroNavMagicHeader;
+  return readAstroNavOtpData(data) && otpStatus.payload_valid;
 }
 
 bool astroNavOtpGetSerialNumber(uint32_t &serial_number) {
   AstroNav_OTP_Data data = {};
-  if (!readAstroNavOtpData(data) || data.magic_header != kAstroNavMagicHeader) {
+  if (!readAstroNavOtpData(data) || !otpStatus.payload_valid) {
     return false;
   }
 
@@ -251,8 +284,21 @@ bool astroNavOtpWasProgrammedThisBoot() {
 
 void initializeAstroNavOtp() {
   AstroNav_OTP_Data currentData = {};
-  if (readAstroNavOtpData(currentData) && currentData.magic_header == kAstroNavMagicHeader) {
+  if (!readAstroNavOtpData(currentData)) {
+    logOtpStatus("OTP read failed. Refusing to write OTP.", otpStatus.last_error);
+    return;
+  }
+
+  if (otpStatus.payload_valid) {
     logOtpStatus("Valid AstroNav OTP payload already present. Skipping write.", BOOTROM_OK);
+    return;
+  }
+
+  if (!otpStatus.blank || ASTRONAV_BUILD_SERIAL_NUMBER == 0) {
+    otpStatus.write_blocked = true;
+    logOtpStatus(otpStatus.blank
+      ? "Blank OTP found, but no production serial is present. Refusing to write."
+      : "Nonblank invalid OTP payload found. Refusing to rewrite OTP.", BOOTROM_OK);
     return;
   }
 
@@ -270,7 +316,7 @@ void initializeAstroNavOtp() {
   }
 
   otpStatus.write_succeeded = true;
-  if (readAstroNavOtpData(currentData) && currentData.magic_header == kAstroNavMagicHeader) {
+  if (readAstroNavOtpData(currentData) && otpStatus.payload_valid) {
     logOtpStatus("OTP payload programmed successfully.", BOOTROM_OK);
   } else {
     otpStatus.write_succeeded = false;
@@ -307,6 +353,9 @@ void printAstroNavOtpSummary() {
                 static_cast<unsigned int>(data.initial_firmware[2]));
   Serial.printf("[OTP] warranty_signature=0x%08lX\n", static_cast<unsigned long>(data.warranty_signature));
   Serial.printf("[OTP] magic_header_valid=%s\n", data.magic_header == kAstroNavMagicHeader ? "YES" : "NO");
+  Serial.printf("[OTP] payload_valid=%s\n", otpStatus.payload_valid ? "YES" : "NO");
+  Serial.printf("[OTP] blank=%s\n", otpStatus.blank ? "YES" : "NO");
+  Serial.printf("[OTP] write_blocked=%s\n", otpStatus.write_blocked ? "YES" : "NO");
   Serial.printf("[OTP] profile_matches_current_build=%s\n", otpStatus.signature_matches_build ? "YES" : "NO");
   Serial.println("[OTP] note: OTP is immutable after first write, so this can be NO on newer firmware builds.");
   Serial.printf("[OTP] official_build_signature=%s\n", otpStatus.official_signature ? "YES" : "NO");

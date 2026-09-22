@@ -88,8 +88,10 @@ static constexpr uint32_t PYRO_PULSE_MS = 1000;
 static constexpr uint32_t PYRO_TEST_CONFIRM_WINDOW_MS = 5000;
 static constexpr uint32_t APOGEE_FIRE_MAX_MS = 500;
 static constexpr uint8_t APOGEE_HOLD_SAMPLES = 8;
-static constexpr uint32_t MAX_FLIGHT_TIME_MS = 45000;
+static constexpr uint32_t SENSOR_FAILURE_WINDOW_MS = 1000;
+static constexpr uint8_t SENSOR_FAILURE_LIMIT = 5;
 static constexpr uint16_t FLIGHT_LOG_CAPACITY = 2048;
+static constexpr uint8_t PRELAUNCH_SAMPLE_CAPACITY = 20;
 static constexpr uint32_t PROFILE_MAGIC = 0x50455246;   // "FRFP"
 static constexpr uint32_t PROFILE_VERSION = 1;
 static constexpr const char *DEVICE_INFO_FILE = "/Settings.ini";
@@ -209,6 +211,8 @@ bool missionLogFlushed = false;
 bool pyroLatched = false;
 bool missionStarted = false;
 bool flightRecordsPendingSave = false;
+bool lowVoltageFault = false;
+bool sensorFault = false;
 
 uint32_t bootMs = 0;
 uint32_t bootPulseUntilMs = 0;
@@ -255,6 +259,10 @@ uint8_t apogeeConfirmCount = 0;
 uint8_t landingConfirmCount = 0;
 uint8_t apogeePeakHoldCount = 0;
 uint32_t apogeePeakHoldStartMs = 0;
+uint8_t imuFailureCount = 0;
+uint8_t baroFailureCount = 0;
+uint32_t imuFailureWindowStartMs = 0;
+uint32_t baroFailureWindowStartMs = 0;
 uint32_t logCounter = 0;
 float peakFlightSpeedMps = 0.0f;
 float peakAccelMagG = 0.0f;
@@ -270,7 +278,9 @@ FlightSettings flightSettings;
 DeviceProfile deviceProfile;
 
 FlightSample missionLog[FLIGHT_LOG_CAPACITY];
+FlightSample prelaunchSamples[PRELAUNCH_SAMPLE_CAPACITY];
 uint16_t missionLogCount = 0;
+uint8_t prelaunchSampleCount = 0;
 uint32_t currentFlightNumber = 0;
 
 char missionLogPath[48] = {0};
@@ -923,6 +933,9 @@ void persistDeviceProfile() {
   infoFile.println();
   infoFile.println("[otp]");
   infoFile.printf("OTP_READ_OK=%s\n", otpReadable ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_PAYLOAD_VALID=%s\n", otpStatus.payload_valid ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_BLANK=%s\n", otpStatus.blank ? "TRUE" : "FALSE");
+  infoFile.printf("OTP_WRITE_BLOCKED=%s\n", otpStatus.write_blocked ? "TRUE" : "FALSE");
   infoFile.printf("OTP_MAGIC_VALID=%s\n", otpStatus.has_magic_header ? "TRUE" : "FALSE");
   infoFile.printf("OTP_PROGRAMMED_THIS_BOOT=%s\n", astroNavOtpWasProgrammedThisBoot() ? "TRUE" : "FALSE");
   infoFile.printf("OTP_PROFILE_MATCHES_CURRENT_BUILD=%s\n", otpStatus.signature_matches_build ? "TRUE" : "FALSE");
@@ -1015,6 +1028,29 @@ bool isLiPoVoltageTooLow() {
   return false;
 }
 
+void recordSensorResult(bool success, bool &sensorOk, uint8_t &failureCount, uint32_t &windowStartMs) {
+  uint32_t now = millis();
+  if (success) {
+    sensorOk = true;
+    failureCount = 0;
+    windowStartMs = now;
+    return;
+  }
+
+  sensorOk = false;
+  if (failureCount == 0 || now - windowStartMs > SENSOR_FAILURE_WINDOW_MS) {
+    failureCount = 1;
+    windowStartMs = now;
+  } else if (failureCount < 255) {
+    failureCount++;
+  }
+
+  boardHealth.warning = true;
+  if (failureCount >= SENSOR_FAILURE_LIMIT) {
+    sensorFault = true;
+  }
+}
+
 float magnitude3(float x, float y, float z) {
   return sqrtf((x * x) + (y * y) + (z * z));
 }
@@ -1057,6 +1093,13 @@ void startMissionLog() {
   Serial.printf("[LOG] Starting mission file: %s\n", missionLogPath);
   persistDeviceProfile();
   missionLogCount = 0;
+  logCounter = 0;
+  for (uint8_t index = 0; index < prelaunchSampleCount; index++) {
+    missionLog[missionLogCount] = prelaunchSamples[index];
+    missionLog[missionLogCount].counter = ++logCounter;
+    missionLogCount++;
+  }
+  prelaunchSampleCount = 0;
   peakAltitude = 0.0f;
   lastAltitudeForVelocity = 0.0f;
   launchConfirmCount = 0;
@@ -1068,7 +1111,6 @@ void startMissionLog() {
   missionStarted = true;
   missionLogFlushed = false;
   flightRecordsPendingSave = true;
-  logCounter = 0;
   peakFlightSpeedMps = 0.0f;
   peakAccelMagG = 0.0f;
 }
@@ -1093,16 +1135,22 @@ void finalizeFlightPersonalRecords() {
 
 void appendMissionSample() {
   if (!missionStarted) {
-    startMissionLog();
+    if (prelaunchSampleCount >= PRELAUNCH_SAMPLE_CAPACITY) {
+      memmove(&prelaunchSamples[0], &prelaunchSamples[1],
+              sizeof(FlightSample) * (PRELAUNCH_SAMPLE_CAPACITY - 1));
+      prelaunchSampleCount = PRELAUNCH_SAMPLE_CAPACITY - 1;
+    }
   }
 
-  if (missionLogCount >= FLIGHT_LOG_CAPACITY) {
+  if (missionStarted && missionLogCount >= FLIGHT_LOG_CAPACITY) {
     boardHealth.warning = true;
     return;
   }
 
-  FlightSample &sample = missionLog[missionLogCount++];
-  sample.counter = ++logCounter;
+  FlightSample &sample = missionStarted
+    ? missionLog[missionLogCount++]
+    : prelaunchSamples[prelaunchSampleCount++];
+  sample.counter = missionStarted ? ++logCounter : 0;
   sample.ms = millis() - bootMs;
   sample.axMg = static_cast<int16_t>(lroundf(currentAx * 1000.0f));
   sample.ayMg = static_cast<int16_t>(lroundf(currentAy * 1000.0f));
@@ -1535,8 +1583,15 @@ void setLedProfile(LedProfile profile) {
 }
 
 void updateStatusLed() {
-  if (boardHealth.critical) {
-    setLedProfile(LedProfile::Fault);
+  if (boardHealth.critical || lowVoltageFault || sensorFault) {
+    static uint32_t lastFaultToggleMs = 0;
+    static bool faultLedOn = false;
+    uint32_t now = millis();
+    if (now - lastFaultToggleMs >= 100) {
+      lastFaultToggleMs = now;
+      faultLedOn = !faultLedOn;
+    }
+    setStatusLED(faultLedOn ? 255 : 0, 0, 0);
     return;
   }
 
@@ -1738,11 +1793,10 @@ void updateFlightStateFromSamples() {
       apogeeConfirmCount = 0;
     }
 
-    bool peakHoldFire = flightSettings.firePyroAtApogee &&
-                        apogeePeakHoldCount >= APOGEE_HOLD_SAMPLES &&
+    bool peakHoldFire = apogeePeakHoldCount >= APOGEE_HOLD_SAMPLES &&
                         (millis() - apogeePeakHoldStartMs) <= APOGEE_FIRE_MAX_MS;
 
-    if (flightSettings.firePyroAtApogee && apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
+    if (apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
       firePyro();
       apogeeConfirmCount = 0;
       apogeePeakHoldCount = 0;
@@ -1753,13 +1807,6 @@ void updateFlightStateFromSamples() {
       apogeePeakHoldStartMs = 0;
     }
 
-    if (!flightSettings.firePyroAtApogee && apogeeConfirmCount >= APOGEE_CONFIRM_SAMPLES) {
-      apogeeConfirmCount = 0;
-    }
-
-    if (!pyroLatched && (millis() - launchMs) > MAX_FLIGHT_TIME_MS) {
-      firePyro();
-    }
   }
 
   bool postLaunchState = flightState == FlightState::Boost ||
@@ -1917,9 +1964,6 @@ void setup() {
       setFlightState(FlightState::Fault);
     } else {
       setFlightState(FlightState::Idle);
-      if (!missionStarted) {
-        startMissionLog();
-      }
     }
   }
 
@@ -1973,7 +2017,7 @@ void loop() {
 
     if (isLiPoVoltageTooLow()) {
       boardHealth.warning = true;
-      setFlightState(FlightState::Fault);
+      lowVoltageFault = true;
     }
 
     float ax = 0.0f;
@@ -1990,10 +2034,9 @@ void loop() {
       currentGx = gx;
       currentGy = gy;
       currentGz = gz;
-      boardHealth.imuStreamOk = true;
+      recordSensorResult(true, boardHealth.imuStreamOk, imuFailureCount, imuFailureWindowStartMs);
     } else if (imuInitialized) {
-      boardHealth.imuStreamOk = false;
-      boardHealth.warning = true;
+      recordSensorResult(false, boardHealth.imuStreamOk, imuFailureCount, imuFailureWindowStartMs);
     }
 
     float temp = 0.0f;
@@ -2001,17 +2044,16 @@ void loop() {
     if (readBaroSample(temp, pressure)) {
       currentTemperature = temp;
       currentPressure = pressure;
-      boardHealth.baroOk = true;
+      recordSensorResult(true, boardHealth.baroOk, baroFailureCount, baroFailureWindowStartMs);
     } else {
-      boardHealth.baroOk = false;
-      boardHealth.warning = true;
+      recordSensorResult(false, boardHealth.baroOk, baroFailureCount, baroFailureWindowStartMs);
     }
 
     if ((boardHealth.imuStreamOk || boardHealth.baroOk) && !boardHealth.critical) {
       updateFlightStateFromSamples();
     }
 
-    if (missionStarted) {
+    if (missionStarted || flightState == FlightState::Idle) {
       appendMissionSample();
     }
 
