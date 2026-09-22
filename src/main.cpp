@@ -11,6 +11,7 @@
 #include "hardware_control.h"
 #include "otp_memory.h"
 #include "usb_info_files.h"
+#include "build_info.h"
 
 #ifndef AUTO_VERSION
 #define AUTO_VERSION "dev"
@@ -48,7 +49,7 @@ extern "C" bool tud_disconnect(void);
 /*
  * AstroNav flight firmware for RP2350
  * - Startup health check with LED status
- * - Pad orientation calibration
+  storageReady = ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES ? false : FatFS.begin();
  * - Launch and apogee detection
  * - Safe pyro pulse and lockout
  * - RAM mission log flushed to flash after landing
@@ -723,6 +724,12 @@ void makeDefaultDeviceProfile() {
 }
 
 void ensureDeviceSerial() {
+  if (ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
+    snprintf(deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber), "RECOVERY");
+    assets.Device_Key = deviceProfile.serialNumber;
+    return;
+  }
+
   uint32_t otpSerialNumber = 0;
   if (astroNavOtpGetSerialNumber(otpSerialNumber)) {
     formatAstroNavDisplaySerial(otpSerialNumber, deviceProfile.serialNumber, sizeof(deviceProfile.serialNumber));
@@ -750,6 +757,12 @@ void syncAssetsFromDeviceProfile() {
 }
 
 bool loadOrCreateDeviceProfile() {
+  if (ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
+    makeDefaultDeviceProfile();
+    updateDeviceProfileChecksum();
+    return false;
+  }
+
   bool legacyFormat = false;
   const char *sourcePath = nullptr;
 
@@ -858,13 +871,15 @@ bool loadOrCreateDeviceProfile() {
 }
 
 void persistDeviceProfile() {
-  if (!storageReady) {
+  if (!storageReady || ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
     return;
   }
 
   ensureDeviceSerial();
+  Serial.println("[BOOT] stage=persist_otp_read_begin");
   AstroNav_OTP_Data otpData = {};
   bool otpReadable = readAstroNavOtpData(otpData);
+  Serial.printf("[BOOT] stage=persist_otp_read_complete ok=%s\n", boolText(otpReadable));
   const AstroNavOtpStatus &otpStatus = getAstroNavOtpStatus();
   char firstFlashStamp[32] = {0};
   snprintf(firstFlashStamp, sizeof(firstFlashStamp), "%s", deviceProfile.flashStamp);
@@ -890,7 +905,9 @@ void persistDeviceProfile() {
   }
 
   updateDeviceProfileChecksum();
+  Serial.println("[BOOT] stage=persist_file_open_begin");
   File infoFile = FatFS.open(DEVICE_INFO_FILE, "w");
+  Serial.printf("[BOOT] stage=persist_file_open_complete ok=%s\n", boolText(static_cast<bool>(infoFile)));
   if (!infoFile) {
     boardHealth.warning = true;
     return;
@@ -965,6 +982,7 @@ void persistDeviceProfile() {
     infoFile.printf("OTP_FIRST_FIRMWARE_MATCHES_CURRENT=%s\n",
                     strcmp(otpInitialFirmwareVersion, assets.Firmware_Version) == 0 ? "TRUE" : "FALSE");
   }
+  Serial.println("[BOOT] stage=persist_profile_write_complete");
   infoFile.println();
   UsbInfoFiles::writeDebugSection(infoFile,
                                   lastFaultReason,
@@ -985,8 +1003,9 @@ void persistDeviceProfile() {
                                   runtimeModeText(),
                                   stateText(flightState),
                                   powerModeText(powerMode));
-  infoFile.flush();
+  Serial.println("[BOOT] stage=persist_debug_write_complete");
   infoFile.close();
+  Serial.println("[BOOT] stage=persist_close_complete");
 }
 
 float clampFloat(float value, float minimum, float maximum) {
@@ -1268,7 +1287,7 @@ bool configureUsbVolumeLabel() {
 }
 
 void ensureUsbInfoFiles() {
-  if (!storageReady) {
+  if (!storageReady || ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
     return;
   }
 
@@ -1889,6 +1908,7 @@ void setup() {
 
   initializeAstroNavOtp();
   printAstroNavOtpSummary();
+  Serial.println("[BOOT] stage=otp_complete");
 
   pinMode(PIN_PYRO, OUTPUT);
   pinMode(PIN_SERVO_1, OUTPUT);
@@ -1911,12 +1931,23 @@ void setup() {
   SPI.setRX(PIN_MISO);
   SPI.setSCK(PIN_SCK);
   SPI.setTX(PIN_MOSI);
+  Serial.println("[BOOT] stage=spi_begin");
   SPI.begin();
+  Serial.println("[BOOT] stage=spi_complete");
 
   boardHealth.coreTickOk = testCoreTick();
   boardHealth.heapOk = testHeap();
   boardHealth.vinOk = readInputVoltage(currentVinVoltage);
   powerMode = classifyPowerSource(currentVinVoltage);
+  if (powerMode == PowerMode::Unknown) {
+    delay(100);
+    boardHealth.vinOk = readInputVoltage(currentVinVoltage);
+    powerMode = classifyPowerSource(currentVinVoltage);
+  }
+  Serial.printf("[BOOT] stage=vin_complete ok=%s voltage=%.3f power=%s\n",
+                boolText(boardHealth.vinOk),
+                currentVinVoltage,
+                powerModeText(powerMode));
   if (powerMode == PowerMode::LiPo1S || powerMode == PowerMode::LiPo2S) {
     detectedBatteryMode = powerMode;
   }
@@ -1924,33 +1955,62 @@ void setup() {
     boardHealth.warning = true;
   }
 
+  Serial.println("[BOOT] stage=baro_begin");
   baro.beginSPI(PIN_CS_BMP, 250000);
   delay(30);
   boardHealth.baroOk = readBaroSample(currentTemperature, currentPressure);
+  Serial.printf("[BOOT] stage=baro_complete ok=%s\n", boolText(boardHealth.baroOk));
 
+  Serial.println("[BOOT] stage=imu_begin");
   bool imuBootOk = configureImu();
   imuInitialized = boardHealth.spiOk && boardHealth.imuWhoAmIOk && boardHealth.imuConfigOk;
   if (imuBootOk) {
     boardHealth.imuStreamOk = verifyImuStream();
     readImuFrame(currentAx, currentAy, currentAz, currentGx, currentGy, currentGz);
   }
+  Serial.printf("[BOOT] stage=imu_complete ok=%s\n", boolText(imuBootOk));
 
-  storageReady = FatFS.begin();
+  Serial.println("[BOOT] stage=fatfs_begin");
+  storageReady = ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES ? false : FatFS.begin();
   boardHealth.flashFsOk = storageReady;
-  if (storageReady) {
+  Serial.printf("[BOOT] stage=fatfs_complete ok=%s\n", boolText(storageReady));
+  if (ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
+    Serial.println("[BOOT] stage=filesystem_access_skipped_recovery");
+  } else if (storageReady) {
+    Serial.println("[BOOT] stage=volume_label_begin");
     configureUsbVolumeLabel();
+    Serial.println("[BOOT] stage=volume_label_complete");
+    Serial.println("[BOOT] stage=logs_directory_begin");
     ensureLogsDirectory();
+    Serial.println("[BOOT] stage=logs_directory_complete");
+    Serial.println("[BOOT] stage=settings_begin");
     loadFlightSettings();
+    Serial.println("[BOOT] stage=settings_complete");
+    Serial.println("[BOOT] stage=profile_begin");
     loadOrCreateDeviceProfile();
+    Serial.println("[BOOT] stage=profile_complete");
+    Serial.println("[BOOT] stage=serial_begin");
     ensureDeviceSerial();
+    Serial.println("[BOOT] stage=serial_complete");
     syncAssetsFromDeviceProfile();
     // Keep FLASH_STAMP aligned with the currently flashed firmware build.
     buildFlashStamp(deviceProfile.flashStamp, sizeof(deviceProfile.flashStamp));
-    persistDeviceProfile();
+    if (ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES) {
+      Serial.println("[BOOT] stage=profile_persist_skipped_recovery");
+    } else {
+      Serial.println("[BOOT] stage=profile_persist_begin");
+      persistDeviceProfile();
+      Serial.println("[BOOT] stage=profile_persist_complete");
+    }
     settingsNeedPersist = false;
   }
 
+  Serial.println("[BOOT] stage=after_persist_return");
+  Serial.printf("[BOOT] stage=post_persist power=%s critical=%s\n",
+                powerModeText(powerMode),
+                boardHealth.critical ? "YES" : "NO");
   if (powerMode == PowerMode::USB && storageReady && !usbFlightOverride) {
+    Serial.println("[BOOT] stage=usb_begin");
     FatFSUSB.onUnplug(onUsbStorageUnplug);
     usbDriveReady = FatFSUSB.begin();
     boardHealth.usbStorageOk = usbDriveReady;
@@ -1958,8 +2018,10 @@ void setup() {
       boardHealth.warning = true;
     }
     ensureUsbInfoFiles();
+    Serial.printf("[BOOT] stage=usb_complete ok=%s\n", boolText(usbDriveReady));
   }
 
+  Serial.println("[BOOT] stage=health_checks_begin");
   if (!boardHealth.coreTickOk || !boardHealth.heapOk || !boardHealth.spiOk ||
       !boardHealth.imuWhoAmIOk || !boardHealth.imuConfigOk || !boardHealth.imuStreamOk ||
       !boardHealth.baroOk) {
@@ -1972,6 +2034,9 @@ void setup() {
     recordFaultAndSafeStop();
   }
 
+  Serial.printf("[BOOT] stage=health_checks_complete critical=%s power=%s\n",
+                boardHealth.critical ? "YES" : "NO",
+                powerModeText(powerMode));
   printStartupSummary();
 
   if (boardHealth.critical) {

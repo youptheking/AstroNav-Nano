@@ -59,6 +59,7 @@ UPLOAD_STATUS = {
     "upload_port": "",
     "otp_preflight": None,
     "otp_preflight_bypass": False,
+    "recovery_skip_filesystem_writes": False,
 }
 
 SEMANTIC_TAG_PATTERN = re.compile(r"^(?:firmware[-_])?v?(\d+)\.(\d+)\.(\d+)$")
@@ -875,6 +876,7 @@ def generate_header(output_path, version, hardware_major, hardware_minor, produc
 #define ASTRONAV_BUILD_INITIAL_FIRMWARE_PATCH {initial_firmware[2]}
 #define ASTRONAV_BUILD_FIRMWARE_AHEAD_COUNT {firmware_ahead_count}
 #define ASTRONAV_BUILD_FIRMWARE_COMMIT_SHA "{c_string_literal(str(firmware_commit_sha).lower())}"
+#define ASTRONAV_RECOVERY_SKIP_FILESYSTEM_WRITES {1 if UPLOAD_STATUS.get("recovery_skip_filesystem_writes") else 0}
 '''
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(header_text, encoding="ascii")
@@ -888,6 +890,9 @@ def register_platformio_upload_hook(platformio_env):
     UPLOAD_STATUS["upload_port"] = resolve_upload_port(platformio_env)
     UPLOAD_STATUS["otp_preflight_bypass"] = parse_bool_value(
         get_platformio_option(platformio_env, "custom_otp_preflight_bypass", "false")
+    )
+    UPLOAD_STATUS["recovery_skip_filesystem_writes"] = parse_bool_value(
+        get_platformio_option(platformio_env, "custom_recovery_skip_filesystem_writes", "false")
     )
 
 
