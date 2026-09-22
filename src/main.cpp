@@ -1406,6 +1406,28 @@ void handleSerialCommand(const char *command) {
     return;
   }
 
+  if (strcmp(upperCommand, "DUMP_HEALTH") == 0) {
+    Serial.printf("[HEALTH] healthy=%s state=%s power=%s vin_mv=%ld warning=%s critical=%s bits=%u\n",
+                  systemHealthy() ? "YES" : "NO",
+                  stateText(flightState),
+                  powerModeText(powerMode),
+            static_cast<long>(lroundf(currentVinVoltage * 1000.0f)),
+                  boardHealth.warning ? "YES" : "NO",
+                  boardHealth.critical ? "YES" : "NO",
+                  static_cast<unsigned int>(healthBits()));
+    Serial.printf("[HEALTH] core=%s heap=%s spi=%s imu_whoami=%s imu_config=%s imu_stream=%s baro=%s flash=%s vin=%s\n",
+                  boardHealth.coreTickOk ? "OK" : "FAIL",
+                  boardHealth.heapOk ? "OK" : "FAIL",
+                  boardHealth.spiOk ? "OK" : "FAIL",
+                  boardHealth.imuWhoAmIOk ? "OK" : "FAIL",
+                  boardHealth.imuConfigOk ? "OK" : "FAIL",
+                  boardHealth.imuStreamOk ? "OK" : "FAIL",
+                  boardHealth.baroOk ? "OK" : "FAIL",
+                  boardHealth.flashFsOk ? "OK" : "FAIL",
+                  boardHealth.vinOk ? "OK" : "FAIL");
+    return;
+  }
+
   if ((strcmp(upperCommand, "FLIGHT") == 0 || strcmp(upperCommand, "EXITUSB") == 0 || strcmp(upperCommand, "ARM") == 0) &&
       powerMode == PowerMode::USB && !usbFlightOverride) {
     enterFlightModeFromUsb();

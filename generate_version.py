@@ -57,6 +57,7 @@ UPLOAD_STATUS = {
     "key_mode": "dummy",
     "track_serial": False,
     "upload_port": "",
+    "otp_preflight": None,
 }
 
 SEMANTIC_TAG_PATTERN = re.compile(r"^(?:firmware[-_])?v?(\d+)\.(\d+)\.(\d+)$")
@@ -65,6 +66,16 @@ SEMANTIC_DESCRIBE_PATTERN = re.compile(
 )
 DISPLAY_SERIAL_PATTERN = re.compile(r"^(?:AN-)?[0-9A-Z]{10}$")
 OTP_SERIAL_LINE_PATTERN = re.compile(r"\[OTP\]\s+serial_number=([0-9A-Z-]+)", re.IGNORECASE)
+OTP_MAGIC_VALID_PATTERN = re.compile(r"\[OTP\]\s+magic_header_valid=(YES|NO)", re.IGNORECASE)
+OTP_PAYLOAD_VALID_PATTERN = re.compile(r"\[OTP\]\s+payload_valid=(YES|NO)", re.IGNORECASE)
+OTP_BLANK_PATTERN = re.compile(r"\[OTP\]\s+blank=(YES|NO)", re.IGNORECASE)
+OTP_WRITE_BLOCKED_PATTERN = re.compile(r"\[OTP\]\s+write_blocked=(YES|NO)", re.IGNORECASE)
+HEALTH_LINE_PATTERN = re.compile(
+    r"\[HEALTH\]\s+healthy=(?P<healthy>YES|NO)\s+state=(?P<state>\S+)\s+"
+    r"power=(?P<power>\S+)\s+vin_mv=(?P<vin_mv>-?\d+)\s+"
+    r"warning=(?P<warning>YES|NO)\s+critical=(?P<critical>YES|NO)\s+bits=(?P<bits>\d+)",
+    re.IGNORECASE,
+)
 
 
 def try_import_platformio_env():
@@ -552,6 +563,135 @@ def read_otp_display_serial_from_device(upload_port):
     return None
 
 
+def read_otp_preflight_from_device(upload_port):
+    try:
+        import serial  # type: ignore
+        from serial.tools import list_ports  # type: ignore
+    except Exception:
+        return None
+
+    def query_port(port_name):
+        status = {
+            "serial": None,
+            "magic_valid": None,
+            "payload_valid": None,
+            "blank": None,
+            "write_blocked": None,
+        }
+        try:
+            with serial.Serial(port_name, 115200, timeout=0.25, write_timeout=1) as port:
+                port.reset_input_buffer()
+                port.write(b"\nDUMP_OTP\n")
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    raw_line = port.readline()
+                    if not raw_line:
+                        continue
+                    text_line = raw_line.decode("utf-8", errors="ignore").strip()
+                    serial_match = OTP_SERIAL_LINE_PATTERN.search(text_line)
+                    if serial_match:
+                        status["serial"] = normalize_display_serial_text(serial_match.group(1))
+                    magic_match = OTP_MAGIC_VALID_PATTERN.search(text_line)
+                    if magic_match:
+                        status["magic_valid"] = magic_match.group(1).upper() == "YES"
+                    payload_match = OTP_PAYLOAD_VALID_PATTERN.search(text_line)
+                    if payload_match:
+                        status["payload_valid"] = payload_match.group(1).upper() == "YES"
+                    blank_match = OTP_BLANK_PATTERN.search(text_line)
+                    if blank_match:
+                        status["blank"] = blank_match.group(1).upper() == "YES"
+                    blocked_match = OTP_WRITE_BLOCKED_PATTERN.search(text_line)
+                    if blocked_match:
+                        status["write_blocked"] = blocked_match.group(1).upper() == "YES"
+        except Exception:
+            return None
+
+        return status if any(value is not None for value in status.values()) else None
+
+    preferred_port = upload_port.strip()
+    discovery_deadline = time.monotonic() + 6.0
+    while time.monotonic() < discovery_deadline:
+        candidate_ports = [preferred_port] if preferred_port else []
+        try:
+            for port_info in list_ports.comports():
+                device_name = str(getattr(port_info, "device", "")).strip()
+                if device_name and device_name not in candidate_ports:
+                    candidate_ports.append(device_name)
+        except Exception:
+            pass
+
+        for candidate in candidate_ports:
+            status = query_port(candidate)
+            if status is not None:
+                return status
+        time.sleep(0.4)
+
+    return None
+
+
+def read_health_from_device(upload_port):
+    try:
+        import serial  # type: ignore
+        from serial.tools import list_ports  # type: ignore
+    except Exception:
+        print(color_text(ANSI_YELLOW, "WARNING: pyserial not available. Device health readback skipped."))
+        return None
+
+    def query_port(port_name):
+        try:
+            with serial.Serial(port_name, 115200, timeout=0.25, write_timeout=1) as port:
+                port.reset_input_buffer()
+                port.write(b"\nDUMP_HEALTH\n")
+                deadline = time.monotonic() + 2.0
+                while time.monotonic() < deadline:
+                    raw_line = port.readline()
+                    if not raw_line:
+                        continue
+                    text_line = raw_line.decode("utf-8", errors="ignore").strip()
+                    match = HEALTH_LINE_PATTERN.search(text_line)
+                    if match:
+                        return match.groupdict()
+        except Exception:
+            return None
+        return None
+
+    preferred_port = upload_port.strip()
+    discovery_deadline = time.monotonic() + 12.0
+    while time.monotonic() < discovery_deadline:
+        candidate_ports = [preferred_port] if preferred_port else []
+        try:
+            for port_info in list_ports.comports():
+                device_name = str(getattr(port_info, "device", "")).strip()
+                if device_name and device_name not in candidate_ports:
+                    candidate_ports.append(device_name)
+        except Exception:
+            pass
+
+        for candidate in candidate_ports:
+            health = query_port(candidate)
+            if health is not None:
+                return health
+        time.sleep(0.4)
+
+    return None
+
+
+def print_device_health(upload_port):
+    health = read_health_from_device(upload_port)
+    if health is None:
+        print(color_text(ANSI_YELLOW, "FINAL DEVICE HEALTH: readback unavailable."))
+        return
+
+    status_color = ANSI_GREEN if health["healthy"].upper() == "YES" else ANSI_RED
+    print(color_text(
+        status_color,
+        "FINAL DEVICE HEALTH: "
+        f"healthy={health['healthy']} state={health['state']} power={health['power']} "
+        f"vin={int(health['vin_mv']) / 1000.0:.3f}V warning={health['warning']} critical={health['critical']} "
+        f"bits={health['bits']}",
+    ))
+
+
 def load_pending_serial_record():
     if not PENDING_SERIAL_PATH.exists():
         return None
@@ -726,9 +866,12 @@ def preview_key_mode():
     return "official"
 
 
-def build_otp_payload(hardware_major, hardware_minor, production_date, production_second, serial_number, initial_firmware):
+def build_otp_payload(hardware_major, hardware_minor, production_date, production_second, serial_number, initial_firmware, firmware_ahead_count, firmware_commit_sha):
     reserved = bytearray(16)
     reserved[0] = production_second & 0xFF
+    reserved[1] = int(firmware_ahead_count) & 0xFF
+    commit_bytes = str(firmware_commit_sha).lower().encode("ascii")[:7]
+    reserved[2:2 + len(commit_bytes)] = commit_bytes
 
     return struct.pack(
         "<I10s5sBB17sI3BI16s",
@@ -803,6 +946,7 @@ def finalize_upload_status():
         append_display_serial_if_missing(otp_display_serial)
         clear_pending_if_matches_display_serial(otp_display_serial)
         print(color_text(ANSI_GREEN, "SUCCESS: AstroNav upload completed."))
+        print_device_health(UPLOAD_STATUS["upload_port"])
         return
 
     if UPLOAD_STATUS["track_serial"]:
@@ -812,6 +956,8 @@ def finalize_upload_status():
     else:
         print(color_text(ANSI_GREEN, "SUCCESS: AstroNav upload completed."))
         print(color_text(ANSI_YELLOW, "INFO: Service upload mode and OTP readback unavailable. Serial list unchanged."))
+
+    print_device_health(UPLOAD_STATUS["upload_port"])
 
 
 def main(cli_args):
@@ -839,22 +985,43 @@ def main(cli_args):
 
     if UPLOAD_STATUS["requested"]:
         is_new_board_armed = parse_bool_env("ASTRONAV_NEW_BOARD")
-        has_pending = has_reusable_pending_serial(
-            version,
-            hardware_major,
-            hardware_minor,
-            initial_firmware,
-            key_mode,
-        )
+        otp_preflight = read_otp_preflight_from_device(UPLOAD_STATUS["upload_port"])
+        UPLOAD_STATUS["otp_preflight"] = otp_preflight
 
-        UPLOAD_STATUS["track_serial"] = is_new_board_armed or has_pending
+        auto_new_board = False
+        existing_otp = False
+        if not is_new_board_armed:
+            if otp_preflight is None:
+                auto_new_board = True
+                print(color_text(ANSI_YELLOW, "WARNING: Existing OTP could not be read before upload. Treating board as new; firmware will still refuse nonblank OTP writes."))
+            elif otp_preflight.get("payload_valid") is True or (
+                otp_preflight.get("magic_valid") is True and otp_preflight.get("serial") is not None
+            ):
+                existing_otp = True
+                print(color_text(ANSI_CYAN, "INFO: Existing valid OTP detected. Preserving device identity."))
+            elif otp_preflight.get("blank") is True:
+                auto_new_board = True
+                print(color_text(ANSI_CYAN, "INFO: Blank OTP detected. Automatically provisioning this new board."))
+            else:
+                raise RuntimeError("FATAL: Device OTP is nonblank but invalid. Upload stopped; OTP will not be rewritten.")
+        elif otp_preflight is not None and (
+            otp_preflight.get("payload_valid") is True or (
+                otp_preflight.get("magic_valid") is True and otp_preflight.get("serial") is not None
+            )
+        ):
+            existing_otp = True
+            print(color_text(ANSI_CYAN, "INFO: Valid OTP detected; ignoring ASTRONAV_NEW_BOARD to preserve device identity."))
+        elif otp_preflight is not None and otp_preflight.get("blank") is not True:
+            raise RuntimeError("FATAL: Device OTP is nonblank but invalid. Upload stopped; OTP will not be rewritten.")
 
-        if is_new_board_armed:
+        UPLOAD_STATUS["track_serial"] = (is_new_board_armed or auto_new_board) and not existing_otp
+
+        if UPLOAD_STATUS["track_serial"] and is_new_board_armed:
             print(color_text(ANSI_CYAN, "INFO: New-board arming detected (ASTRONAV_NEW_BOARD=1)."))
-        elif has_pending:
-            print(color_text(ANSI_CYAN, "INFO: Reusing existing pending serial for upload retry."))
+        elif UPLOAD_STATUS["track_serial"] and auto_new_board:
+            print(color_text(ANSI_CYAN, "INFO: Automatic new-board provisioning enabled."))
         else:
-            print(color_text(ANSI_YELLOW, "INFO: Existing-firmware upload detected. Serial list unchanged. Set ASTRONAV_NEW_BOARD=1 only for first-time OTP provisioning."))
+            print(color_text(ANSI_YELLOW, "INFO: Existing-firmware upload detected. Serial list unchanged."))
 
     production_date, production_second, serial_number = resolve_serial_number_for_build(
         UPLOAD_STATUS["track_serial"],
@@ -875,6 +1042,8 @@ def main(cli_args):
         production_second,
         serial_number,
         initial_firmware,
+        int(firmware_tag_info.get("ahead_count", 0)),
+        str(firmware_tag_info.get("commit_sha", "0000000")),
     )
     warranty_signature = calculate_warranty_signature(secret_key, payload_without_signature)
     generate_header(
