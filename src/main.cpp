@@ -63,6 +63,8 @@ static constexpr float VIN_DIVIDER_TOP_OHMS = 20000.0f;
 static constexpr float VIN_DIVIDER_BOTTOM_OHMS = 10000.0f;
 static constexpr float VIN_DIVIDER_RATIO =
   (VIN_DIVIDER_TOP_OHMS + VIN_DIVIDER_BOTTOM_OHMS) / VIN_DIVIDER_BOTTOM_OHMS;
+static constexpr float LIPO_1S_LOW_VOLTAGE = 3.5f;
+static constexpr float LIPO_2S_LOW_VOLTAGE = 7.0f;
 
 static constexpr uint32_t SAMPLE_PERIOD_MS = 50;
 static constexpr uint32_t LED_PERIOD_MS = 25;
@@ -194,6 +196,7 @@ SPISettings spiSettings(500000, MSBFIRST, SPI_MODE3);
 
 BoardHealth boardHealth;
 PowerMode powerMode = PowerMode::Unknown;
+PowerMode detectedBatteryMode = PowerMode::Unknown;
 FlightState flightState = FlightState::Booting;
 
 bool imuInitialized = false;
@@ -1000,6 +1003,16 @@ bool systemHealthy() {
   return boardHealth.coreTickOk && boardHealth.heapOk && boardHealth.spiOk &&
          boardHealth.imuWhoAmIOk && boardHealth.imuConfigOk && boardHealth.imuStreamOk &&
          boardHealth.baroOk && !boardHealth.critical;
+}
+
+bool isLiPoVoltageTooLow() {
+  if (detectedBatteryMode == PowerMode::LiPo1S) {
+    return currentVinVoltage <= LIPO_1S_LOW_VOLTAGE;
+  }
+  if (detectedBatteryMode == PowerMode::LiPo2S) {
+    return currentVinVoltage <= LIPO_2S_LOW_VOLTAGE;
+  }
+  return false;
 }
 
 float magnitude3(float x, float y, float z) {
@@ -1835,6 +1848,9 @@ void setup() {
   boardHealth.heapOk = testHeap();
   boardHealth.vinOk = readInputVoltage(currentVinVoltage);
   powerMode = classifyPowerSource(currentVinVoltage);
+  if (powerMode == PowerMode::LiPo1S || powerMode == PowerMode::LiPo2S) {
+    detectedBatteryMode = powerMode;
+  }
   if (!boardHealth.vinOk || powerMode == PowerMode::Unknown) {
     boardHealth.warning = true;
   }
@@ -1953,6 +1969,11 @@ void loop() {
       powerMode = classifyPowerSource(currentVinVoltage);
     } else {
       boardHealth.warning = true;
+    }
+
+    if (isLiPoVoltageTooLow()) {
+      boardHealth.warning = true;
+      setFlightState(FlightState::Fault);
     }
 
     float ax = 0.0f;
