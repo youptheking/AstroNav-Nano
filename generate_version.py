@@ -141,6 +141,19 @@ def parse_semantic_describe_output(describe_text):
     }
 
 
+def get_last_known_firmware_version():
+    try:
+        header_text = run_git_command(["git", "show", "HEAD:include/build_info.h"])
+    except Exception:
+        return [0, 0, 0]
+
+    match = re.search(r'#define AUTO_VERSION "(?:firmware-)?v?(\d+)\.(\d+)\.(\d+)(?:_|\")', header_text, re.IGNORECASE)
+    if match is None:
+        return [0, 0, 0]
+
+    return [int(match.group(1)), int(match.group(2)), int(match.group(3))]
+
+
 def get_required_firmware_tag_info():
     try:
         head_short_sha = run_git_command(["git", "rev-parse", "--short=7", "HEAD"]).lower()
@@ -181,10 +194,22 @@ def get_required_firmware_tag_info():
             ]
         )
     except Exception as error:
-        raise RuntimeError(
-            "FATAL: No semantic tag found on HEAD and unable to derive one from commit history. "
-            "Tag the commit (for example 'firmware-v1.1.0') or ensure a prior semantic tag exists."
-        ) from error
+        fallback_version = get_last_known_firmware_version()
+        fallback_tag = build_semantic_commit_version(fallback_version, 0, head_short_sha)
+        print(
+            color_text(
+                ANSI_YELLOW,
+                "WARNING: No semantic firmware tag is reachable. Using development version "
+                f"{fallback_tag}; tag release builds with 'firmware-vX.Y.Z'.",
+            )
+        )
+        return {
+            "tag": fallback_tag,
+            "version": fallback_version,
+            "base_tag": "development",
+            "ahead_count": 0,
+            "commit_sha": head_short_sha,
+        }
 
     described = parse_semantic_describe_output(describe_text)
     if described is None:
